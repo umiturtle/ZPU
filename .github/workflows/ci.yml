@@ -4,6 +4,12 @@
 # downloaded from ziglang.org (checked in the same way the project does locally),
 # and every step is a `zig build` invocation. No Python, no package manager, no
 # package registry — the repository has no Zig dependencies to fetch.
+#
+# Every build step pipes its output through `tee -a ci.log` (`shell: bash` on all
+# three platforms, so one idiom works everywhere). When a step fails, the
+# "Failure details" step at the end copies the tail of that log into the job's
+# summary, which is readable through the API — a red run explains itself without
+# anyone having to open the browser.
 name: CI
 
 on:
@@ -56,28 +62,46 @@ jobs:
           "$($dir.FullName)" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: zig version
+        shell: bash
         run: zig version
 
       - name: Formatting and tests
-        run: zig build check
+        shell: bash
+        run: zig build check 2>&1 | tee -a ci.log
 
       - name: Tests (explicit)
-        run: zig build test
+        shell: bash
+        run: zig build test 2>&1 | tee -a ci.log
 
       - name: Documentation
-        run: zig build doc
+        shell: bash
+        run: zig build doc 2>&1 | tee -a ci.log
 
       - name: Examples
-        run: zig build examples
+        shell: bash
+        run: zig build examples 2>&1 | tee -a ci.log
 
       # Runners have no GPU, so this exercises the other half of the backend
       # contract: probing finds nothing, opening a device returns `null`, and the
       # kernel runs on the CPU without crashing or printing a wrong number.
       - name: Backend probe (no GPU on CI runners)
-        run: zig build run-gpu-probe
+        shell: bash
+        run: zig build run-gpu-probe 2>&1 | tee -a ci.log
 
       - name: Benchmark smoke test
-        run: zig build bench -- --quick
+        shell: bash
+        run: zig build bench -- --quick 2>&1 | tee -a ci.log
+
+      - name: Failure details
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo '### Log tail'
+            echo '```'
+            tail -80 ci.log 2>/dev/null || echo "(no log captured)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # A runner with no GPU still gets to exercise the *device* path: lavapipe is a
   # software Vulkan implementation (mesa), needs no /dev/dri, and speaks real
@@ -106,13 +130,27 @@ jobs:
           sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers vulkan-tools
 
       - name: What the runner has
-        run: vulkaninfo --summary || true
+        shell: bash
+        run: vulkaninfo --summary 2>&1 | tee -a gpu.log || true
 
       - name: The kernel must run on the device
-        run: ZPU_REQUIRE_GPU=vulkan zig build run-gpu-probe
+        shell: bash
+        run: ZPU_REQUIRE_GPU=vulkan zig build run-gpu-probe 2>&1 | tee -a gpu.log
 
       - name: And the tests still pass with a driver present
-        run: zig build test
+        shell: bash
+        run: zig build test 2>&1 | tee -a gpu.log
+
+      - name: Failure details
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo '### Log tail'
+            echo '```'
+            tail -80 gpu.log 2>/dev/null || echo "(no log captured)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   docs:
     name: docs artifact
