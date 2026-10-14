@@ -81,7 +81,7 @@ pub fn build(b: *std.Build) void {
     // Every module also carries unit tests next to the code it covers. They are
     // collected by the module roots themselves (see the `test` block at the end
     // of src/zpu.zig and src/backend.zig), so each module gets its own runner.
-    const module_test_mods = [_]*std.Build.Module{ zpu_mod, backend_mod };
+    const module_test_mods = [_]*std.Build.Module{ zpu_mod, zgf_mod, backend_mod };
     for (module_test_mods) |mod| {
         const t = b.addTest(.{ .root_module = mod });
         const run = b.addRunArtifact(t);

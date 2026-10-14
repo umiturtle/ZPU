@@ -202,6 +202,7 @@ pub const logicalOr = ops.logicalOr;
 pub const logicalXor = ops.logicalXor;
 pub const logicalNot = ops.logicalNot;
 pub const addScalar = ops.addScalar;
+pub const subScalar = ops.subScalar;
 pub const mulScalar = ops.mulScalar;
 pub const divScalar = ops.divScalar;
 pub const scalarLike = ops.scalarLike;
