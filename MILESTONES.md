@@ -145,13 +145,13 @@ ZPU は 2 つのライブラリを 1 つのリポジトリで育てる。
 ## M10 — 仕上げ (進行中)
 
 * [x] README に「他ライブラリとの違い」と実測ベンチを載せる
-* [x] 調査用の実行時計測コードを残さない（一貫性の検査は comptime へ）
+* [x] 調査用の実行時計測コードを残さない（一貫性の検査は comptime へ。
+      `build.zig` に残っていた未使用の調査オプションも削除した）
 * [ ] Zig 0.17 のイディオム見直し（`std.Io`、エラーセット、`@splat`、`inline for`）
 * [ ] 公開 API の doc コメント網羅（`zig build doc` の警告ゼロ）
 * [ ] `examples/` の充実 — `build.zig` が名前を挙げている 8 本のうち
       `gpu-probe` 以外（`tensors` / `autodiff` / `train-mlp` / `images` /
       `vector-art` / `render3d` / `diff-render` / `serve_demo`）を書く
-* [ ] `LICENSE` ファイル（README は MIT と書いている）
 * [ ] タグ付けとリリースノート
 
 ---

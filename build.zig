@@ -2,7 +2,7 @@
 //!
 //! Steps:
 //!
-//! * `zig build test`       — unit, numerical and property tests (`-Dtest-filter`, `-Dtest-trace`)
+//! * `zig build test`       — unit, numerical and property tests (`-Dtest-filter`)
 //! * `zig build bench`      — benchmark suite (`-Dbench-filter=…`, `-Dbench-json=…`)
 //! * `zig build doc`        — regenerate the HTML feature reference into `zig-out/doc`
 //! * `zig build examples`   — build every example
@@ -53,17 +53,12 @@ pub fn build(b: *std.Build) void {
 
     // -------------------------------------------------------------------- tests
     const test_step = b.step("test", "Run the ZPU/ZGF test suite");
-    const options = b.addOptions();
-    options.addOption(bool, "trace_alloc", b.option(bool, "test-trace", "Dump every allocation made by the test suite") orelse false);
-    options.addOption(bool, "std_alloc", if (b.option([]const u8, "test-alloc", "Allocator used by the test suite: 'detector' (default) or 'std'")) |v| std.mem.eql(u8, v, "std") else false);
     const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this string");
-    const options_mod = options.createModule();
 
     const imports = [_]std.Build.Module.Import{
         .{ .name = "zpu", .module = zpu_mod },
         .{ .name = "zgf", .module = zgf_mod },
         .{ .name = "zbackend", .module = backend_mod },
-        .{ .name = "zpu_options", .module = options_mod },
     };
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
