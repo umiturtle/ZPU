@@ -22,6 +22,7 @@
 //! a storage buffer, and a push constant block `{ u32 count; u32 threads; }`.
 const std = @import("std");
 const builtin = @import("builtin");
+const Library = @import("lib.zig").Library;
 
 /// Vulkan's ABI: `__stdcall` on Windows, the C convention elsewhere.
 const VKAPI = if (builtin.os.tag == .windows) std.builtin.CallingConvention.winapi else std.builtin.CallingConvention.c;
@@ -421,7 +422,7 @@ const spirv_mod = @import("spirv.zig");
 /// `vkGetDeviceProcAddr` — the API's fast path, where the loader hands back a
 /// direct pointer instead of a trampoline.
 pub const Loader = struct {
-    lib: std.DynLib,
+    lib: Library,
     /// Global: present as soon as the library is open.
     get_instance_proc: *const fn (?VkInstance, [*:0]const u8) callconv(VKAPI) ?*const anyopaque,
     create_instance: *const fn (*const InstanceCreateInfo, ?*const anyopaque, *VkInstance) callconv(VKAPI) i32,
@@ -464,7 +465,7 @@ pub const Loader = struct {
     }
 
     fn tryLoad(name: []const u8, err_out: *?anyerror) ?Loader {
-        var lib = std.DynLib.open(name) catch |e| {
+        var lib = Library.open(name) catch |e| {
             err_out.* = e;
             return null;
         };
@@ -484,7 +485,7 @@ pub const Loader = struct {
         return loader;
     }
 
-    fn fromHandle(lib: std.DynLib, get_instance_proc: anytype) ?Loader {
+    fn fromHandle(lib: Library, get_instance_proc: anytype) ?Loader {
         var self = Loader{
             .lib = lib,
             .get_instance_proc = get_instance_proc,

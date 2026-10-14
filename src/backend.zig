@@ -24,6 +24,7 @@
 //! ```
 const std = @import("std");
 const builtin = @import("builtin");
+const lib_mod = @import("backend/lib.zig");
 
 pub const Backend = enum {
     cpu,
@@ -146,12 +147,24 @@ pub const Report = struct {
 
     /// The best backend available on this machine (never fails: `cpu` is always
     /// present).
+    ///
+    /// "Available" means *something to run on*, not just a library that loaded:
+    /// a machine with the Vulkan loader installed and no ICD (a plain CI runner,
+    /// for instance) enumerates zero devices, and picking vulkan there would send
+    /// every dispatch down the "the device refused, use the CPU" path. The CPU is
+    /// the honest answer, and `has` still tells the whole story.
     pub fn best(self: Report) Backend {
-        if (self.webgpu) return .webgpu;
-        if (self.metal) return .metal;
-        if (self.vulkan) return .vulkan;
-        if (self.d3d12) return .d3d12;
+        if (self.usable(.webgpu)) return .webgpu;
+        if (self.usable(.metal)) return .metal;
+        if (self.usable(.vulkan)) return .vulkan;
+        if (self.usable(.d3d12)) return .d3d12;
         return .cpu;
+    }
+
+    /// The backend is present *and* has a device to dispatch on.
+    pub fn usable(self: Report, b: Backend) bool {
+        if (b == .cpu) return true;
+        return self.has(b) and self.detail(b).device_count > 0;
     }
 
     pub fn has(self: Report, b: Backend) bool {
@@ -320,7 +333,7 @@ fn probeBackend(backend: Backend) Info {
             if (vulkanInfoFrom(name)) |info| return info;
             continue;
         }
-        var lib = std.DynLib.open(name) catch continue;
+        var lib = lib_mod.Library.open(name) catch continue;
         defer lib.close();
         var info = Info{ .available = true, .library_path = name };
         probeLib(backend, &lib, &info);
@@ -352,7 +365,7 @@ fn vulkanInfoFrom(path: []const u8) ?Info {
 }
 
 /// A driver is usable when the entry point the backend needs exists.
-fn symbolProbe(lib: *std.DynLib, symbol: [:0]const u8, info: *Info) void {
+fn symbolProbe(lib: *lib_mod.Library, symbol: [:0]const u8, info: *Info) void {
     if (lib.lookup(*const anyopaque, symbol) == null) {
         info.available = false;
         return;
@@ -364,7 +377,7 @@ fn symbolProbe(lib: *std.DynLib, symbol: [:0]const u8, info: *Info) void {
     info.names_len = 1;
 }
 
-fn probeLib(backend: Backend, lib: *std.DynLib, info: *Info) void {
+fn probeLib(backend: Backend, lib: *lib_mod.Library, info: *Info) void {
     switch (backend) {
         .metal => symbolProbe(lib, "MTLCreateSystemDefaultDevice", info),
         .d3d12 => symbolProbe(lib, "D3D12CreateDevice", info),
@@ -995,6 +1008,38 @@ pub const RunBuffers = struct {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "best asks for a device, not just a loader" {
+    // A machine with the loader installed and no ICD — a plain CI runner — sees
+    // `vkGetInstanceProcAddr`, opens an instance and enumerates *zero* devices.
+    // Reporting that as "the best backend for compute" would make every dispatch
+    // take the "device refused, fall back to the CPU" path, so `best` asks for a
+    // device and `has` keeps reporting the whole truth.
+    var report = Report{
+        .cpu = true,
+        .webgpu = false,
+        .metal = false,
+        .vulkan = true,
+        .d3d12 = false,
+    };
+    report.info[@backingInt(Backend.vulkan)] = .{
+        .available = true,
+        .library_path = "libvulkan.so.1",
+        .api_version = 0x00403000,
+        .device_count = 0,
+    };
+    try testing.expect(report.has(.vulkan));
+    try testing.expect(!report.usable(.vulkan));
+    try testing.expectEqual(Backend.cpu, report.best());
+
+    // Once an ICD answers with one device, vulkan is the right answer again.
+    report.info[@backingInt(Backend.vulkan)].device_count = 1;
+    try testing.expect(report.usable(.vulkan));
+    try testing.expectEqual(Backend.vulkan, report.best());
+
+    // The CPU needs no device list to be usable.
+    try testing.expect(report.usable(.cpu));
+}
 
 test "probe always reports the cpu backend" {
     const r = probe();

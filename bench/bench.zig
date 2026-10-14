@@ -326,6 +326,9 @@ pub fn main(init: std.process.Init) !void {
 
     try out.print("{s:<28} {s:>12} {s:>12} {s:>10}\n", .{ "case", "rate", "unit", "ns/iter" });
     try out.print("{s:-<28} {s:->12} {s:->12} {s:->10}\n", .{ "", "", "", "" });
+    // Flush the header and every case: a run that crashes (or is killed) should
+    // still say which case it got to.
+    try out.flush();
 
     for (cases) |case| {
         if (opts.filter) |f| {
@@ -341,6 +344,7 @@ pub fn main(init: std.process.Init) !void {
             .iters = timer.iters,
         });
         try out.print("{s:<28} {d:>12.3} {s:>12} {d:>10.1}\n", .{ case.name, rate, case.kind.unit(), timer.ns_per_iter });
+        try out.flush();
     }
     try out.flush();
 

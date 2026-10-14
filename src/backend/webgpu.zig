@@ -23,6 +23,7 @@
 //! `zbackend.Kernel.lower`.
 const std = @import("std");
 const builtin = @import("builtin");
+const Library = @import("lib.zig").Library;
 
 pub const Error = error{
     NoAdapter,
@@ -327,7 +328,7 @@ fn onMapped(status: u32, buffer: WGPUBuffer, offset: u64, userdata: ?*anyopaque)
 
 /// Runtime-resolved entry points.
 pub const Loader = struct {
-    lib: std.DynLib,
+    lib: Library,
     /// `wgpuGetProcAddress`, present on Dawn. wgpu-native exports the entry
     /// points directly instead.
     get_proc: ?*const fn (StringView) callconv(.c) ?*const anyopaque,
@@ -391,7 +392,7 @@ pub const Loader = struct {
     }
 
     fn tryLoad(name: []const u8, err_out: *?anyerror) ?Loader {
-        var lib = std.DynLib.open(name) catch |e| {
+        var lib = Library.open(name) catch |e| {
             err_out.* = e;
             return null;
         };
