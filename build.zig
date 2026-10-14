@@ -141,6 +141,12 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path(ex.file),
                 .target = target,
                 .optimize = optimize,
+                // A graphics driver is a C++ shared object on most machines, so
+                // its constructors have to run. The platform loader does that
+                // when a program links libc; Zig's built-in ELF loader (what the
+                // library itself uses) does not. Programs that talk to real
+                // drivers want libc; the library never needs it.
+                .link_libc = std.mem.eql(u8, ex.name, "gpu-probe"),
                 .imports = &.{
                     .{ .name = "zpu", .module = zpu_mod },
                     .{ .name = "zgf", .module = zgf_mod },

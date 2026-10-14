@@ -198,21 +198,114 @@ pub fn probe() Report {
     return report;
 }
 
+/// Driver libraries a program pointed at explicitly, one slot per backend.
+var overrides: [ALL.len]?[]const u8 = @splat(null);
+
+/// Points a backend at a specific driver library: a bare name searched on the
+/// platform's library path, or an absolute path.
+///
+/// Use it for the drivers the default list cannot know about — a software
+/// rasterizer such as SwiftShader, an ICD named in `VK_DRIVER_FILES`, MoltenVK,
+/// a browser's WebGPU implementation. `null` restores the platform defaults.
+///
+/// Because the probe result is cached per thread, set this before the first
+/// `probe()` (or before `zpu.init`); it only affects probes and `open` calls
+/// that happen afterwards. Programs that have `std.process.Init` can call
+/// `configureFromEnvironment` instead of reading variables themselves.
+pub fn setDriverLibrary(backend: Backend, library: ?[]const u8) void {
+    overrides[@backingInt(backend)] = library;
+}
+
+fn driverOverride(backend: Backend) ?[]const u8 {
+    return overrides[@backingInt(backend)];
+}
+
+/// Reads the usual variables out of a program's environment and points the
+/// backends at what they name:
+///
+/// * `ZPU_VULKAN_LIB` / `ZPU_WEBGPU_LIB` — a library name or an absolute path,
+/// * `VK_DRIVER_FILES` / `VK_ICD_FILENAMES` — the standard Vulkan variables; the
+///   first entry that names a library (not a JSON manifest) is used, because a
+///   Vulkan driver can be loaded directly, without the loader in between.
+///
+/// The map must outlive the backends' use (the strings are borrowed).
+pub fn configureFromEnvironment(environ_map: *std.process.Environ.Map) void {
+    if (environ_map.get("ZPU_VULKAN_LIB")) |path| setDriverLibrary(.vulkan, path);
+    if (environ_map.get("ZPU_WEBGPU_LIB")) |path| setDriverLibrary(.webgpu, path);
+    if (driverOverride(.vulkan) != null) return;
+    const keys = [_][]const u8{ "VK_DRIVER_FILES", "VK_ICD_FILENAMES" };
+    for (keys) |key| {
+        if (driverOverride(.vulkan) != null) break;
+        const value = environ_map.get(key) orelse continue;
+        var it = std.mem.tokenizeAny(u8, value, " \t:");
+        while (it.next()) |entry| {
+            // A JSON manifest has to be resolved by a loader; a library path can
+            // be driven directly, which is what this layer does.
+            if (std.mem.endsWith(u8, entry, ".json")) continue;
+            setDriverLibrary(.vulkan, entry);
+            break;
+        }
+    }
+}
+
+/// The first library that opens for `backend`: an explicitly configured driver
+/// wins, otherwise the platform's list is tried in order.
+fn openLibrary(backend: Backend) ?std.DynLib {
+    if (driverOverride(backend)) |path| return std.DynLib.open(path) catch null;
+    for (libraryNames(backend)) |name| {
+        if (std.DynLib.open(name) catch null) |lib| return lib;
+    }
+    return null;
+}
+
 fn probeBackend(backend: Backend) Info {
+    if (backend == .vulkan) return vulkanInfo();
+    const library = driverOverride(backend) orelse null;
+    if (library) |path| {
+        var lib = std.DynLib.open(path) catch return .{};
+        defer lib.close();
+        var info = Info{ .available = true, .library_path = path };
+        probeLib(backend, &lib, &info);
+        return info;
+    }
     for (libraryNames(backend)) |name| {
         var lib = std.DynLib.open(name) catch continue;
         defer lib.close();
         var info = Info{ .available = true, .library_path = name };
-        switch (backend) {
-            .vulkan => vulkanProbe(&lib, &info),
-            .metal => symbolProbe(&lib, "MTLCreateSystemDefaultDevice", &info),
-            .d3d12 => symbolProbe(&lib, "D3D12CreateDevice", &info),
-            .webgpu => symbolProbe(&lib, "wgpuCreateInstance", &info),
-            .cpu => {},
-        }
+        probeLib(backend, &lib, &info);
         return info;
     }
     return .{};
+}
+
+/// The Vulkan probe lives in the device module, with the ABI: creating an
+/// instance and enumerating physical devices is exactly what `vulkan.probe`
+/// does. This copies the fixed-size result into an `Info`.
+fn vulkanInfo() Info {
+    if (driverOverride(.vulkan)) |path| return vulkanInfoFrom(path) orelse .{};
+    for (libraryNames(.vulkan)) |name| {
+        if (vulkanInfoFrom(name)) |info| return info;
+    }
+    return .{};
+}
+
+fn vulkanInfoFrom(path: []const u8) ?Info {
+    const probed = vulkan.probe(path) orelse return null;
+    var info = Info{
+        .available = true,
+        .library_path = path,
+        .api_version = probed.api_version,
+        .device_count = probed.count,
+    };
+    const n = @min(@as(usize, probed.count), info.names.len);
+    for (0..n) |i| {
+        const device_name = probed.name(i);
+        const len = @min(device_name.len, info.names[i].len);
+        @memcpy(info.names[i][0..len], device_name[0..len]);
+        info.name_lens[i] = @intCast(len);
+    }
+    info.names_len = @intCast(n);
+    return info;
 }
 
 /// A driver is usable when the entry point the backend needs exists.
@@ -228,122 +321,14 @@ fn symbolProbe(lib: *std.DynLib, symbol: [:0]const u8, info: *Info) void {
     info.names_len = 1;
 }
 
-// ---------------------------------------------------------------------------
-// Vulkan loader probe
-//
-// The Vulkan loader is a plain C ABI, so a probe can create an instance,
-// enumerate the physical devices and read their names without any SDK headers
-// being present at build time. The struct layouts below are the first fields of
-// the real ones; `VkPhysicalDeviceProperties` is read into an oversized buffer
-// because the driver writes the whole struct.
-// ---------------------------------------------------------------------------
-const vk = struct {
-    const Success: i32 = 0;
-    const ApplicationInfoStype: u32 = 0;
-    const InstanceCreateInfoStype: u32 = 1;
-    const physical_device_type_discrete_gpu: u32 = 2;
-
-    const ApplicationInfo = extern struct {
-        sType: u32 = ApplicationInfoStype,
-        pNext: ?*const anyopaque = null,
-        pApplicationName: ?[*:0]const u8 = "zpu",
-        applicationVersion: u32 = 1,
-        pEngineName: ?[*:0]const u8 = "zpu",
-        engineVersion: u32 = 1,
-        apiVersion: u32 = (1 << 22),
-    };
-
-    const InstanceCreateInfo = extern struct {
-        sType: u32 = InstanceCreateInfoStype,
-        pNext: ?*const anyopaque = null,
-        flags: u32 = 0,
-        pApplicationInfo: ?*const ApplicationInfo = null,
-        enabledLayerCount: u32 = 0,
-        ppEnabledLayerNames: ?[*]const [*:0]const u8 = null,
-        enabledExtensionCount: u32 = 0,
-        ppEnabledExtensionNames: ?[*]const [*:0]const u8 = null,
-    };
-
-    const CreateInstanceFn = *const fn (*const InstanceCreateInfo, ?*const anyopaque, *?*anyopaque) callconv(.c) i32;
-    const EnumerateInstanceVersionFn = *const fn (*u32) callconv(.c) i32;
-    const GetInstanceProcAddrFn = *const fn (?*anyopaque, [*:0]const u8) callconv(.c) ?*const anyopaque;
-    const EnumeratePhysicalDevicesFn = *const fn (?*anyopaque, *u32, ?[*]?*anyopaque) callconv(.c) i32;
-    const GetPhysicalDevicePropertiesFn = *const fn (?*anyopaque, *anyopaque) callconv(.c) void;
-    const DestroyInstanceFn = *const fn (?*anyopaque, ?*const anyopaque) callconv(.c) void;
-};
-
-fn vulkanProbe(lib: *std.DynLib, info: *Info) void {
-    const gpa = lib.lookup(vk.GetInstanceProcAddrFn, "vkGetInstanceProcAddr") orelse {
-        info.available = false;
-        return;
-    };
-
-    // loader version (optional: 1.0 loaders do not export it)
-    if (gpa(null, "vkEnumerateInstanceVersion")) |ptr| {
-        const f: vk.EnumerateInstanceVersionFn = @ptrCast(ptr);
-        var version: u32 = 0;
-        if (f(&version) == vk.Success) info.api_version = version;
+fn probeLib(backend: Backend, lib: *std.DynLib, info: *Info) void {
+    switch (backend) {
+        .metal => symbolProbe(lib, "MTLCreateSystemDefaultDevice", info),
+        .d3d12 => symbolProbe(lib, "D3D12CreateDevice", info),
+        .webgpu => symbolProbe(lib, "wgpuCreateInstance", info),
+        // Vulkan goes through `vulkanInfo`: its probe needs the ABI.
+        .vulkan, .cpu => {},
     }
-
-    const create_ptr = gpa(null, "vkCreateInstance") orelse {
-        info.available = false;
-        return;
-    };
-    const create: vk.CreateInstanceFn = @ptrCast(create_ptr);
-
-    var app = vk.ApplicationInfo{};
-    var ci = vk.InstanceCreateInfo{ .pApplicationInfo = &app };
-    if (info.api_version >= (1 << 22)) {
-        app.apiVersion = @min(info.api_version, @as(u32, 3 << 22));
-        ci.pApplicationInfo = &app;
-    }
-    var instance: ?*anyopaque = null;
-    if (create(&ci, null, &instance) != vk.Success) {
-        // The loader is present but no driver answered: still usable in
-        // principle, just not on this machine.
-        info.available = true;
-        info.device_count = 0;
-        return;
-    }
-    const inst = instance orelse {
-        info.device_count = 0;
-        return;
-    };
-    defer {
-        if (gpa(inst, "vkDestroyInstance")) |ptr| {
-            const destroy: vk.DestroyInstanceFn = @ptrCast(ptr);
-            destroy(inst, null);
-        }
-    }
-
-    const enum_ptr = gpa(inst, "vkEnumeratePhysicalDevices") orelse return;
-    const enumerate: vk.EnumeratePhysicalDevicesFn = @ptrCast(enum_ptr);
-    const props_ptr = gpa(inst, "vkGetPhysicalDeviceProperties") orelse return;
-    const get_props: vk.GetPhysicalDevicePropertiesFn = @ptrCast(props_ptr);
-
-    var count: u32 = 0;
-    if (enumerate(inst, &count, null) != vk.Success) return;
-    info.device_count = count;
-    if (count == 0) return;
-
-    var devices: [8]?*anyopaque = @splat(null);
-    var want: u32 = @min(count, 8);
-    if (enumerate(inst, &want, &devices) != vk.Success) return;
-
-    for (devices[0..want], 0..) |dev, i| {
-        // The driver fills the whole VkPhysicalDeviceProperties; the fields we
-        // read are the first ones, so an oversized zeroed buffer is safe.
-        var props: [2048]u8 = @splat(0);
-        get_props(dev, &props);
-        const api_version = std.mem.readInt(u32, props[0..4], .little);
-        if (i == 0) info.api_version = api_version;
-        const dev_name = props[20..276]; // VkPhysicalDeviceProperties.deviceName
-        const len = std.mem.indexOfScalar(u8, dev_name, 0) orelse dev_name.len;
-        const n = @min(len, info.names[i].len);
-        @memcpy(info.names[i][0..n], dev_name[0..n]);
-        info.name_lens[i] = @intCast(n);
-    }
-    info.names_len = @intCast(want);
 }
 
 /// The concrete driver found for `backend`, or `null`.
@@ -590,8 +575,12 @@ fn workerBody(kernel: Kernel, ctx: *KernelCtx, slice: usize, workers: usize, fai
 // Devices: opening a driver and dispatching on it
 // ---------------------------------------------------------------------------
 
-const vulkan = @import("backend/vulkan.zig");
-const webgpu = @import("backend/webgpu.zig");
+pub const vulkan = @import("backend/vulkan.zig");
+pub const webgpu = @import("backend/webgpu.zig");
+
+/// SPIR-V bytecode (and the sources it came from) for the kernels this
+/// repository ships as verified artifacts.
+pub const spirv = @import("backend/spirv.zig");
 
 /// A live connection to a backend.
 ///
@@ -624,10 +613,33 @@ pub const Device = union(Backend) {
 /// library, no adapter, no device), an error only when something went wrong
 /// while opening.
 pub fn openDevice(backend: Backend) Error!?Device {
+    return openDeviceNamed(backend, null);
+}
+
+/// Opens `backend` through one specific library, ignoring both the platform
+/// defaults and `setDriverLibrary`.
+pub fn openDeviceAt(backend: Backend, library: []const u8) Error!?Device {
+    return openDeviceNamed(backend, library);
+}
+
+fn openDeviceNamed(backend: Backend, explicit: ?[]const u8) Error!?Device {
+    const library = explicit orelse driverOverride(backend);
     return switch (backend) {
         .cpu => Device{ .cpu = {} },
-        .vulkan => if (vulkan.Device.open(null) catch |e| return mapDeviceError(e)) |d| Device{ .vulkan = d } else null,
-        .webgpu => if (webgpu.Device.open() catch |e| return mapDeviceError(e)) |d| Device{ .webgpu = d } else null,
+        .vulkan => blk: {
+            const opened = if (library) |name|
+                (vulkan.Device.openAt(name, null) catch |e| return mapDeviceError(e))
+            else
+                (vulkan.Device.open(null) catch |e| return mapDeviceError(e));
+            break :blk if (opened) |d| Device{ .vulkan = d } else null;
+        },
+        .webgpu => blk: {
+            const opened = if (library) |name|
+                (webgpu.Device.openAt(name) catch |e| return mapDeviceError(e))
+            else
+                (webgpu.Device.open() catch |e| return mapDeviceError(e));
+            break :blk if (opened) |d| Device{ .webgpu = d } else null;
+        },
         .metal, .d3d12 => null,
     };
 }
@@ -705,7 +717,7 @@ pub fn dispatchOn(dev: *Device, kernel: Kernel, ctx: *KernelCtx) Error!void {
 pub const entry_point = "main";
 
 fn dispatchVulkan(d: *vulkan.Device, kernel: Kernel, ctx: *KernelCtx) Error!void {
-    const spirv = kernel.spirv orelse return Error.Unsupported;
+    const code = kernel.spirv orelse return Error.Unsupported;
     const alloc = ctx.alloc;
     const allocs = try alloc.alloc(vulkan.Device.Allocation, ctx.buffers.len);
     defer alloc.free(allocs);
@@ -719,7 +731,7 @@ fn dispatchVulkan(d: *vulkan.Device, kernel: Kernel, ctx: *KernelCtx) Error!void
     const bindings = try alloc.alloc(vulkan.Device.BufferBinding, ctx.buffers.len);
     defer alloc.free(bindings);
     for (allocs, 0..) |a, i| bindings[i] = .{ .buffer = a.buffer, .size = a.size };
-    d.dispatchCompute(spirv, bindings, ctx.count, ctx.threads) catch |e| return mapDeviceError(e);
+    d.dispatchCompute(code, bindings, ctx.count, ctx.threads) catch |e| return mapDeviceError(e);
     // Host-coherent memory: the device's writes are already visible.
     for (ctx.buffers, 0..) |b, i| d.download(allocs[i], b.ptr[0..b.len]);
 }
@@ -888,9 +900,9 @@ test "canRun decides per backend" {
     try testing.expect(!wgsl_only.canRun(.metal));
     try testing.expect(!wgsl_only.canRun(.vulkan));
 
-    const spirv = Kernel{ .name = "k", .body = base.body, .spirv = &.{ 0x07230203, 0, 1, 0 } };
-    try testing.expect(spirv.canRun(.vulkan));
-    try testing.expect(!spirv.canRun(.webgpu));
+    const with_spirv = Kernel{ .name = "k", .body = base.body, .spirv = &.{ 0x07230203, 0, 1, 0 } };
+    try testing.expect(with_spirv.canRun(.vulkan));
+    try testing.expect(!with_spirv.canRun(.webgpu));
 }
 
 test "the cpu device is always openable and runs the zig body" {
@@ -942,4 +954,40 @@ test "available() lists the cpu backend at least" {
     defer testing.allocator.free(list);
     try testing.expect(list.len >= 1);
     try testing.expectEqual(Backend.cpu, list[list.len - 1]);
+}
+
+test "when a driver is installed the kernel really runs on the device" {
+    // On a machine with no driver the CPU fallback (tested above) is all there
+    // is, and `probe` says so. When the probe *does* see a driver — a real GPU,
+    // or a software rasterizer such as SwiftShader or lavapipe — the device has
+    // to open and the shipped SPIR-V has to produce the right numbers.
+    if (!probe().has(.vulkan)) return;
+    const dev = (try device(.vulkan)) orelse return error.DeviceRefused;
+    defer shutdownDevices();
+
+    var data: [256]f32 = undefined;
+    for (&data, 0..) |*v, i| v.* = @floatFromInt(i);
+    var scale = [1]f32{2.0};
+    var bufs = [_]Buffer{
+        .{ .ptr = @ptrCast(&data), .len = @sizeOf(@TypeOf(data)) },
+        .{ .ptr = @ptrCast(&scale), .len = @sizeOf(@TypeOf(scale)) },
+    };
+    var ctx = KernelCtx{
+        .buffers = &bufs,
+        .count = data.len,
+        .threads = 64,
+        .alloc = testing.allocator,
+    };
+    try dispatchOn(dev, .{
+        .name = "scale_offset",
+        .body = struct {
+            fn body(_: *KernelCtx) void {}
+        }.body,
+        .source = .{ .wgsl = spirv.scale_offset_wgsl, .glsl = spirv.scale_offset_glsl },
+        .spirv = &spirv.scale_offset,
+    }, &ctx);
+    for (data, 0..) |v, i| {
+        const want = @as(f32, @floatFromInt(i)) * 2.0 + @as(f32, @floatFromInt(i));
+        try testing.expectApproxEqAbs(want, v, 1e-3);
+    }
 }

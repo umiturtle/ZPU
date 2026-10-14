@@ -38,9 +38,65 @@ pub const Error = error{
 /// The libraries the loader is known by, per platform.
 pub fn libraryNames() []const []const u8 {
     return switch (builtin.os.tag) {
-        .windows => &.{"vulkan-1.dll"},
+        .windows => &.{ "vulkan-1.dll", "vk_swiftshader.dll" },
         .macos => &.{ "libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib" },
+        .linux => linuxLibraryNames(),
         else => &.{ "libvulkan.so.1", "libvulkan.so" },
+    };
+}
+
+/// Linux keeps shared objects in a per-architecture directory as often as in
+/// `/usr/lib`, and Zig's dynamic loader (the one used when a program does not
+/// link libc) searches only the plain ones. Both spellings are listed.
+///
+/// The loader comes first, then the software rasterizers a machine may have
+/// instead of a GPU: SwiftShader (Chrome's CPU Vulkan) and Mesa's lavapipe.
+/// Both are valid ICDs, and an ICD can be loaded and driven directly — a Vulkan
+/// driver exports the entry points itself.
+fn linuxLibraryNames() []const []const u8 {
+    // Zig's built-in dynamic loader does not run a library's constructors, and
+    // SwiftShader and lavapipe are C++ (SwiftShader needs its own runtime
+    // initialised before any entry point works). Only the loader is loaded that
+    // way, and it is plain C: it brings up the driver itself, constructors and
+    // all. A program that links libc — the usual case for graphics work, and
+    // what `examples/gpu_probe.zig` does — gets the full list, because then the
+    // platform loader resolves the driver and runs its constructors.
+    if (!builtin.link_libc) {
+        const dir = comptime multiarchDir() orelse return &.{ "libvulkan.so.1", "libvulkan.so" };
+        return &.{
+            "libvulkan.so.1",
+            "libvulkan.so",
+            "/usr/lib/" ++ dir ++ "/libvulkan.so.1",
+            "/usr/lib/" ++ dir ++ "/libvulkan.so",
+        };
+    }
+    const dir = comptime multiarchDir() orelse
+        return &.{ "libvulkan.so.1", "libvulkan.so", "libvk_swiftshader.so", "libvulkan_lvp.so" };
+    return &.{
+        "libvulkan.so.1",
+        "libvulkan.so",
+        "libvk_swiftshader.so",
+        "libvulkan_lvp.so",
+        "/usr/lib/" ++ dir ++ "/libvulkan.so.1",
+        "/usr/lib/" ++ dir ++ "/libvulkan.so",
+        "/usr/lib/" ++ dir ++ "/libvk_swiftshader.so",
+        "/usr/lib/" ++ dir ++ "/libvulkan_lvp.so",
+    };
+}
+
+/// The Debian-style multiarch directory of the host, `null` on architectures
+/// that have no such convention.
+fn multiarchDir() ?[]const u8 {
+    return switch (builtin.cpu.arch) {
+        .x86_64 => "x86_64-linux-gnu",
+        .x86 => "i386-linux-gnu",
+        .aarch64 => "aarch64-linux-gnu",
+        .arm, .armeb, .thumb, .thumbeb => "arm-linux-gnueabihf",
+        .riscv64 => "riscv64-linux-gnu",
+        .s390x => "s390x-linux-gnu",
+        .powerpc64le => "powerpc64le-linux-gnu",
+        .loongarch64 => "loongarch64-linux-gnu",
+        else => null,
     };
 }
 
@@ -347,24 +403,41 @@ pub const PushParams = extern struct {
 
 // ----------------------------------------------------------------- the loader
 
-/// Function pointers resolved by name. Vulkan exposes instance level entry
-/// points through `vkGetInstanceProcAddr` and device level ones through
-/// `vkGetDeviceProcAddr`; the CPU-side fallbacks (here: core 1.0 only) are
-/// resolved from the loader itself.
+/// Function pointers resolved by name.
+///
+/// Vulkan resolves commands in *stages*, and the stages are not a formality: a
+/// driver is only obliged to answer with a null instance for the global
+/// commands (`vkCreateInstance` and friends). An installation that hands the
+/// driver over directly — an ICD such as SwiftShader or lavapipe, rather than
+/// the system loader — returns null for everything else until there is an
+/// instance, which is why loading happens in two steps:
+///
+/// 1. `openAt` / `open` resolve what works without an instance: the two lookup
+///    entry points and `vkCreateInstance`,
+/// 2. `createInstance` calls `resolveWith` on the instance it just made, which
+///    fills in the instance level commands.
+///
+/// Device level commands are resolved separately, in `Device.init`, through
+/// `vkGetDeviceProcAddr` — the API's fast path, where the loader hands back a
+/// direct pointer instead of a trampoline.
 pub const Loader = struct {
     lib: std.DynLib,
-    /// Held so the device entry points can be looked up later.
-    get_instance_proc: *const fn (?VkInstance, [*:0]const u8, ?*const anyopaque) callconv(VKAPI) ?*const anyopaque,
-
+    /// Global: present as soon as the library is open.
+    get_instance_proc: *const fn (?VkInstance, [*:0]const u8) callconv(VKAPI) ?*const anyopaque,
     create_instance: *const fn (*const InstanceCreateInfo, ?*const anyopaque, *VkInstance) callconv(VKAPI) i32,
-    destroy_instance: *const fn (VkInstance, ?*const anyopaque) callconv(VKAPI) void,
-    enumerate_physical_devices: *const fn (VkPhysicalDevice, ?*u32, ?[*]VkPhysicalDevice) callconv(VKAPI) i32,
-    get_physical_device_properties: *const fn (VkPhysicalDevice, *PhysicalDeviceProperties) callconv(VKAPI) void,
-    get_physical_device_memory_properties: *const fn (VkPhysicalDevice, *PhysicalDeviceMemoryProperties) callconv(VKAPI) void,
-    get_physical_device_queue_family_properties: *const fn (VkPhysicalDevice, *u32, ?[*]QueueFamilyProperties) callconv(VKAPI) void,
-    create_device: *const fn (VkPhysicalDevice, *const DeviceCreateInfo, ?*const anyopaque, *VkDevice) callconv(VKAPI) i32,
 
-    /// Opens the first library that provides `vkGetInstanceProcAddr`.
+    /// Instance level: `undefined` until `createInstance` has run. Nothing
+    /// outside this file may call them before that.
+    get_device_proc: *const fn (?VkDevice, [*:0]const u8) callconv(VKAPI) ?*const anyopaque = undefined,
+    destroy_instance: *const fn (VkInstance, ?*const anyopaque) callconv(VKAPI) void = undefined,
+    enumerate_physical_devices: *const fn (VkInstance, ?*u32, ?[*]VkPhysicalDevice) callconv(VKAPI) i32 = undefined,
+    get_physical_device_properties: *const fn (VkPhysicalDevice, *PhysicalDeviceProperties) callconv(VKAPI) void = undefined,
+    get_physical_device_memory_properties: *const fn (VkPhysicalDevice, *PhysicalDeviceMemoryProperties) callconv(VKAPI) void = undefined,
+    get_physical_device_queue_family_properties: *const fn (VkPhysicalDevice, *u32, ?[*]QueueFamilyProperties) callconv(VKAPI) void = undefined,
+    create_device: *const fn (VkPhysicalDevice, *const DeviceCreateInfo, ?*const anyopaque, *VkDevice) callconv(VKAPI) i32 = undefined,
+
+    /// Opens the first library on the platform's list that provides
+    /// `vkGetInstanceProcAddr`.
     pub fn open() ?Loader {
         var err: ?anyerror = null;
         return openWith(&err);
@@ -372,21 +445,43 @@ pub const Loader = struct {
 
     pub fn openWith(err_out: *?anyerror) ?Loader {
         for (libraryNames()) |name| {
-            var lib = std.DynLib.open(name) catch |e| {
-                err_out.* = e;
-                continue;
-            };
-            const get_instance_proc = lib.lookup(
-                *const fn (?VkInstance, [*:0]const u8, ?*const anyopaque) callconv(VKAPI) ?*const anyopaque,
-                "vkGetInstanceProcAddr",
-            ) orelse continue;
-            const loader = Loader.fromHandle(lib, get_instance_proc) orelse {
-                lib.close();
-                continue;
-            };
-            return loader;
+            if (tryLoad(name, err_out)) |loader| return loader;
         }
         return null;
+    }
+
+    /// Opens one specific library: a bare name searched on the platform's
+    /// library path, or an absolute path.
+    ///
+    /// This is how a program points ZPU at something other than the system
+    /// loader — a software rasterizer such as SwiftShader, an ICD named in
+    /// `VK_DRIVER_FILES`, or a shim such as MoltenVK. An ICD works as well as a
+    /// loader here, because Vulkan drivers export `vkGetInstanceProcAddr`
+    /// themselves.
+    pub fn openAt(library: []const u8) ?Loader {
+        var err: ?anyerror = null;
+        return tryLoad(library, &err);
+    }
+
+    fn tryLoad(name: []const u8, err_out: *?anyerror) ?Loader {
+        var lib = std.DynLib.open(name) catch |e| {
+            err_out.* = e;
+            return null;
+        };
+        const get_instance_proc = lib.lookup(
+            *const fn (?VkInstance, [*:0]const u8) callconv(VKAPI) ?*const anyopaque,
+            "vkGetInstanceProcAddr",
+        ) orelse {
+            err_out.* = error.SymbolMissing;
+            lib.close();
+            return null;
+        };
+        const loader = Loader.fromHandle(lib, get_instance_proc) orelse {
+            err_out.* = error.SymbolMissing;
+            lib.close();
+            return null;
+        };
+        return loader;
     }
 
     fn fromHandle(lib: std.DynLib, get_instance_proc: anytype) ?Loader {
@@ -394,25 +489,38 @@ pub const Loader = struct {
             .lib = lib,
             .get_instance_proc = get_instance_proc,
             .create_instance = undefined,
-            .destroy_instance = undefined,
-            .enumerate_physical_devices = undefined,
-            .get_physical_device_properties = undefined,
-            .get_physical_device_memory_properties = undefined,
-            .get_physical_device_queue_family_properties = undefined,
-            .create_device = undefined,
         };
         self.create_instance = self.load(@TypeOf(self.create_instance), "vkCreateInstance") orelse return null;
-        self.destroy_instance = self.load(@TypeOf(self.destroy_instance), "vkDestroyInstance") orelse return null;
-        self.enumerate_physical_devices = self.load(@TypeOf(self.enumerate_physical_devices), "vkEnumeratePhysicalDevices") orelse return null;
-        self.get_physical_device_properties = self.load(@TypeOf(self.get_physical_device_properties), "vkGetPhysicalDeviceProperties") orelse return null;
-        self.get_physical_device_memory_properties = self.load(@TypeOf(self.get_physical_device_memory_properties), "vkGetPhysicalDeviceMemoryProperties") orelse return null;
-        self.get_physical_device_queue_family_properties = self.load(@TypeOf(self.get_physical_device_queue_family_properties), "vkGetPhysicalDeviceQueueFamilyProperties") orelse return null;
-        self.create_device = self.load(@TypeOf(self.create_device), "vkCreateDevice") orelse return null;
         return self;
     }
 
+    /// Resolves the entry points that need an instance, from the instance.
+    ///
+    /// Every command this backend uses is required by core Vulkan 1.0 with the
+    /// one device extension it enables, so a null here means the library is not
+    /// a usable driver and the caller reports "no Vulkan" rather than a
+    /// half-working device.
+    fn resolveWith(self: *Loader, instance: VkInstance) Error!void {
+        const wanted = [_]struct { field: []const u8, symbol: [*:0]const u8 }{
+            .{ .field = "get_device_proc", .symbol = "vkGetDeviceProcAddr" },
+            .{ .field = "destroy_instance", .symbol = "vkDestroyInstance" },
+            .{ .field = "enumerate_physical_devices", .symbol = "vkEnumeratePhysicalDevices" },
+            .{ .field = "get_physical_device_properties", .symbol = "vkGetPhysicalDeviceProperties" },
+            .{ .field = "get_physical_device_memory_properties", .symbol = "vkGetPhysicalDeviceMemoryProperties" },
+            .{ .field = "get_physical_device_queue_family_properties", .symbol = "vkGetPhysicalDeviceQueueFamilyProperties" },
+            .{ .field = "create_device", .symbol = "vkCreateDevice" },
+        };
+        inline for (wanted) |w| {
+            const raw = self.get_instance_proc(instance, w.symbol) orelse return Error.LoaderUnavailable;
+            @field(self, w.field) = @ptrCast(@alignCast(raw));
+        }
+    }
+
+    /// A global command: resolvable with a null instance. Used for
+    /// `vkCreateInstance` and `vkEnumerateInstanceVersion`; a driver that also
+    /// answers for other commands here is not relied upon (see `resolveWith`).
     fn load(self: *const Loader, comptime T: type, symbol: [*:0]const u8) ?T {
-        const raw = self.get_instance_proc(null, symbol, null) orelse return null;
+        const raw = self.get_instance_proc(null, symbol) orelse return null;
         return @ptrCast(@alignCast(raw));
     }
 
@@ -430,14 +538,79 @@ pub const Loader = struct {
         return v;
     }
 
-    pub fn createInstance(self: *const Loader, api_version: u32) Error!VkInstance {
+    /// Creates the instance and resolves the instance level commands on it.
+    pub fn createInstance(self: *Loader, api_version: u32) Error!VkInstance {
         const app = ApplicationInfo{ .api_version = api_version };
         const info = InstanceCreateInfo{ .application_info = &app };
         var instance: VkInstance = undefined;
         if (self.create_instance(&info, null, &instance) != VK_SUCCESS) return Error.VulkanFailed;
+        self.resolveWith(instance) catch |e| {
+            // Half a loader is worse than none: hand the instance back and fail.
+            const PFn = *const fn (VkInstance, ?*const anyopaque) callconv(VKAPI) void;
+            if (self.get_instance_proc(instance, "vkDestroyInstance")) |raw| {
+                const destroy: PFn = @ptrCast(@alignCast(raw));
+                destroy(instance, null);
+            }
+            return e;
+        };
         return instance;
     }
 };
+
+// -------------------------------------------------------------------- probe
+
+/// What a caller can learn without opening a device: the driver version and the
+/// names of the physical devices, in fixed buffers so nothing allocates.
+pub const DeviceInfo = struct {
+    pub const max_devices = 8;
+    pub const max_name = 128;
+
+    names: [max_devices][max_name]u8 = @splat(@splat(0)),
+    name_lens: [max_devices]u8 = @splat(0),
+    count: u32 = 0,
+    api_version: u32 = 0,
+
+    pub fn name(self: *const DeviceInfo, i: usize) []const u8 {
+        if (i >= self.count or i >= max_devices) return "";
+        return self.names[i][0..self.name_lens[i]];
+    }
+};
+
+/// Opens `path` — a loader or an ICD — and asks it what it has: a real instance,
+/// a real device enumeration, real device names.
+///
+/// `null` when the library cannot be used as a Vulkan driver at all. A driver
+/// that answers but has no device comes back with `count == 0`, which is a
+/// different answer and callers rely on the difference.
+pub fn probe(path: []const u8) ?DeviceInfo {
+    const maybe = Loader.openAt(path) orelse return null;
+    var loader = maybe;
+    defer loader.close();
+
+    var info = DeviceInfo{ .api_version = loader.instanceVersion() };
+    const api_version = @max(info.api_version, 1 << 22); // at least Vulkan 1.0
+    const instance = loader.createInstance(@min(api_version, 3 << 22)) catch return info;
+    defer loader.destroy_instance(instance, null);
+
+    var count: u32 = 0;
+    if (loader.enumerate_physical_devices(instance, &count, null) != VK_SUCCESS) return info;
+    if (count == 0) return info;
+
+    var devices: [DeviceInfo.max_devices]VkPhysicalDevice = undefined;
+    var want: u32 = @min(count, DeviceInfo.max_devices);
+    if (loader.enumerate_physical_devices(instance, &want, &devices) != VK_SUCCESS) return info;
+    info.count = want;
+    for (devices[0..want], 0..) |dev, i| {
+        var props = PhysicalDeviceProperties{};
+        loader.get_physical_device_properties(dev, &props);
+        if (i == 0 and props.api_version != 0) info.api_version = props.api_version;
+        const device_name = props.name();
+        const len = @min(device_name.len, DeviceInfo.max_name);
+        @memcpy(info.names[i][0..len], device_name[0..len]);
+        info.name_lens[i] = @intCast(len);
+    }
+    return info;
+}
 
 // ----------------------------------------------------------------- the device
 
@@ -622,21 +795,35 @@ pub const Device = struct {
     pub fn open(device_index: ?usize) Error!?Device {
         var load_err: ?anyerror = null;
         const loader = Loader.openWith(&load_err) orelse return null;
+        return openWithLoader(loader, device_index);
+    }
+
+    /// Same as `open`, but through one specific library (see `Loader.openAt`).
+    pub fn openAt(library: []const u8, device_index: ?usize) Error!?Device {
+        const loader = Loader.openAt(library) orelse return null;
+        return openWithLoader(loader, device_index);
+    }
+
+    fn openWithLoader(loader: Loader, device_index: ?usize) Error!?Device {
         return Device.init(loader, device_index) catch |e| switch (e) {
             error.OutOfMemory => error.OutOfMemory,
             else => null,
         };
     }
 
+    /// Tears down a device on an error path, without its entry point table.
     fn self_destroy(loader: *const Loader, device: VkDevice) void {
         const PFn = *const fn (VkDevice, ?*const anyopaque) callconv(VKAPI) void;
-        const raw = loader.get_instance_proc(null, "vkDestroyDevice", null) orelse return;
+        const raw = loader.get_device_proc(device, "vkDestroyDevice") orelse return;
         const f: PFn = @ptrCast(@alignCast(raw));
         f(device, null);
     }
 
+    /// A device level command, resolved from the device: the loader returns a
+    /// direct pointer here instead of the trampoline it would give for the same
+    /// command through `vkGetInstanceProcAddr`.
     fn loadDeviceFn(loader: *const Loader, device: VkDevice, comptime T: type, symbol: [*:0]const u8) Error!T {
-        const raw = loader.get_instance_proc(device, symbol, null) orelse return Error.VulkanFailed;
+        const raw = loader.get_device_proc(device, symbol) orelse return Error.VulkanFailed;
         return @ptrCast(@alignCast(raw));
     }
 
@@ -841,6 +1028,41 @@ test "loader names match the host platform" {
         else => "libvulkan.so.1",
     };
     try std.testing.expectEqualStrings(expected, names[0]);
+    // Where the platform loader can bring a driver up — always, except in a
+    // Linux program that does not link libc — the software rasterizers are
+    // listed too, so a machine without a GPU still has a chance of running the
+    // Vulkan path.
+    if (builtin.link_libc or builtin.os.tag != .linux) {
+        const software = switch (builtin.os.tag) {
+            .windows => "vk_swiftshader.dll",
+            .macos => "libMoltenVK.dylib",
+            else => "libvk_swiftshader.so",
+        };
+        var found = false;
+        for (names) |n| found = found or std.mem.eql(u8, n, software);
+        try std.testing.expect(found);
+    }
+}
+
+test "openAt on a path that is not a library is null, not a crash" {
+    try std.testing.expect(Loader.openAt("/nonexistent/libvulkan.so.1") == null);
+    try std.testing.expect(probe("/nonexistent/libvulkan.so.1") == null);
+}
+
+test "probe reports the devices of a software rasterizer when one is installed" {
+    // Optional: the test driver is only there when the machine (or the CI job)
+    // installed one. The accessors must stay safe either way.
+    const candidates = [_][]const u8{ "libvk_swiftshader.so", "libvulkan_lvp.so" };
+    for (candidates) |c| {
+        if (probe(c)) |found| {
+            try std.testing.expect(found.count >= 1);
+            try std.testing.expect(found.name(0).len != 0);
+            try std.testing.expect(found.name(found.count + 4).len == 0); // out of range is empty
+            return;
+        }
+    }
+    // Nothing installed: `probe` must have said so without crashing.
+    try std.testing.expect(probe("libvk_swiftshader.so") == null);
 }
 
 test "opening a missing loader fails cleanly" {

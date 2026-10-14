@@ -34,9 +34,9 @@ pub const Error = error{
 /// Where the implementation lives on each platform.
 pub fn libraryNames() []const []const u8 {
     return switch (builtin.os.tag) {
-        .windows => &.{"webgpu_dawn.dll"},
+        .windows => &.{ "webgpu_dawn.dll", "wgpu_native.dll" },
         .macos => &.{ "libwebgpu_dawn.dylib", "libwgpu_native.dylib" },
-        else => &.{ "libwebgpu_dawn.so", "libwgpu_native.so", "libwebgpu.so" },
+        else => &.{ "libwebgpu_dawn.so", "libwgpu_native.so", "libwebgpu.so", "libdawn_native.so" },
     };
 }
 
@@ -376,25 +376,38 @@ pub const Loader = struct {
 
     pub fn openWith(err_out: *?anyerror) ?Loader {
         for (libraryNames()) |name| {
-            var lib = std.DynLib.open(name) catch |e| {
-                err_out.* = e;
-                continue;
-            };
-            const get_proc = lib.lookup(
-                *const fn (StringView) callconv(.c) ?*const anyopaque,
-                PROC_NAME,
-            ) orelse null;
-            var self: Loader = undefined;
-            self.lib = lib;
-            self.get_proc = get_proc;
-            if (!self.bindAll()) {
-                err_out.* = error.SymbolMissing;
-                lib.close();
-                continue;
-            }
-            return self;
+            if (tryLoad(name, err_out)) |loader| return loader;
         }
         return null;
+    }
+
+    /// Opens one specific library: a bare name searched on the platform's
+    /// library path, or an absolute path — how a program picks the WebGPU
+    /// implementation it wants (Dawn out of a browser bundle, wgpu-native, a
+    /// build in a non-standard prefix).
+    pub fn openAt(library: []const u8) ?Loader {
+        var err: ?anyerror = null;
+        return tryLoad(library, &err);
+    }
+
+    fn tryLoad(name: []const u8, err_out: *?anyerror) ?Loader {
+        var lib = std.DynLib.open(name) catch |e| {
+            err_out.* = e;
+            return null;
+        };
+        const get_proc = lib.lookup(
+            *const fn (StringView) callconv(.c) ?*const anyopaque,
+            PROC_NAME,
+        ) orelse null;
+        var self: Loader = undefined;
+        self.lib = lib;
+        self.get_proc = get_proc;
+        if (!self.bindAll()) {
+            err_out.* = error.SymbolMissing;
+            lib.close();
+            return null;
+        }
+        return self;
     }
 
     /// Resolves the whole table; one missing entry means the library is not an
@@ -497,6 +510,16 @@ pub const Device = struct {
     pub fn open() Error!?Device {
         var load_err: ?anyerror = null;
         const loader = Loader.openWith(&load_err) orelse return null;
+        return openWithLoader(loader);
+    }
+
+    /// Same as `open`, but through one specific library (see `Loader.openAt`).
+    pub fn openAt(library: []const u8) Error!?Device {
+        const loader = Loader.openAt(library) orelse return null;
+        return openWithLoader(loader);
+    }
+
+    fn openWithLoader(loader: Loader) Error!?Device {
         return Device.init(loader) catch |e| switch (e) {
             error.OutOfMemory => error.OutOfMemory,
             else => null,
@@ -713,6 +736,10 @@ test "library names match the host platform" {
         else => "libwebgpu_dawn.so",
     };
     try std.testing.expectEqualStrings(expected, names[0]);
+}
+
+test "openAt on a path that is not a library is null, not a crash" {
+    try std.testing.expect(Loader.openAt("/nonexistent/libwebgpu_dawn.so") == null);
 }
 
 test "opening a missing library fails cleanly" {
