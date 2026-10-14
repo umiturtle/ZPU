@@ -382,6 +382,23 @@ pub const Image = struct {
         return img;
     }
 
+    /// Takes a computed tensor as the new image ("what I just calculated is what
+    /// I want to look at"): `[H, W, C]` with `C` in 1, 3 or 4, clamped to
+    /// `0..1` and quantised to 8 bit. The tensor is *copied*, so the caller
+    /// keeps owning it — and anything a filter or a gradient produced can be
+    /// saved without a detour through a byte buffer.
+    pub fn fromTensor(alloc: std.mem.Allocator, t: zpu.Tensor) Error!Image {
+        if (t.rank() != 3) return Error.InvalidImage;
+        const h = t.shape.dims[0];
+        const w = t.shape.dims[1];
+        const c = t.shape.dims[2];
+        if (c != 1 and c != 3 and c != 4) return Error.InvalidImage;
+        var img = try Image.init(alloc, w, h, c);
+        errdefer img.deinit();
+        for (0..t.numel()) |i| img.pixels.writeF64(i, std.math.clamp(t.readLogical(t.numel(), i), 0, 1));
+        return img;
+    }
+
     /// Binary PPM/PGM (P6/P5). The header is text, the pixels are 8 bit sRGB.
     pub fn toPpm(self: *const Image, alloc: std.mem.Allocator) Error![]u8 {
         const body = try self.toPixels(alloc);
@@ -523,6 +540,35 @@ test "ppm bytes are a valid P6 file" {
     try std.testing.expectEqual(@as(usize, 11 + 6), ppm.len);
     try std.testing.expectEqual(@as(u8, 255), ppm[11]);
     try std.testing.expectEqual(@as(u8, 0), ppm[16]);
+}
+
+test "a tensor becomes an image without a byte detour" {
+    const alloc = std.testing.allocator;
+    try zpu.init(alloc, .{});
+    var scope = try zpu.Scope.init(alloc);
+    defer scope.deinit();
+
+    // A filter's output (or a gradient, or anything else the core produced) goes
+    // straight in; values outside 0..1 are clamped rather than wrapping.
+    var img = try Image.init(alloc, 2, 2, 3);
+    defer img.deinit();
+    img.fill(.{ .r = 0.25, .g = 0.5, .b = 0.75 });
+    const blurry = try img.blur(1);
+    var soft = try Image.fromTensor(alloc, blurry);
+    defer soft.deinit();
+    try std.testing.expectEqual(img.width(), soft.width());
+    try std.testing.expectEqual(img.channels(), soft.channels());
+    // Blurring pads with zeros, so border pixels can only get darker than the
+    // uniform colour they started from — and the channel ordering survives.
+    try std.testing.expect(soft.pixels.readF64(0) > 0.0);
+    try std.testing.expect(soft.pixels.readF64(0) <= 0.25 + 1e-6);
+    try std.testing.expect(soft.pixels.readF64(1) > soft.pixels.readF64(0));
+    try std.testing.expect(soft.pixels.readF64(2) > soft.pixels.readF64(1));
+
+    const out_of_range = try zpu.Tensor.full(zpu.Shape.initComptime(&.{ 2, 2, 3 }), .f32, 4.0);
+    var clamped = try Image.fromTensor(alloc, out_of_range);
+    defer clamped.deinit();
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), clamped.pixels.readF64(0), 1e-6);
 }
 
 test "ppm decodes back into the image it came from" {
