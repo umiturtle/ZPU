@@ -67,11 +67,11 @@ pub fn main(init: std.process.Init) !void {
             .source = .{
                 .wgsl =
                 \\@group(0) @binding(0) var<storage, read_write> data: array<f32>;
-                \\@group(0) @binding(1) var<uniform> scale: f32;
+                \\@group(0) @binding(1) var<storage, read> scale: array<f32>;
                 \\@compute @workgroup_size({threads})
                 \\fn {name}(@builtin(global_invocation_id) gid: vec3<u32>) {
                 \\    let i = gid.x;
-                \\    data[i] = data[i] * scale + f32(i);
+                \\    data[i] = data[i] * scale[0] + f32(i);
                 \\}
                 ,
                 .msl =
@@ -80,26 +80,26 @@ pub fn main(init: std.process.Init) !void {
                 \\kernel void {name}(device float *data [[buffer(0)]],
                 \\                  constant float &scale [[buffer(1)]],
                 \\                  uint i [[thread_position_in_grid]]) {
-                \\    data[i] = data[i] * scale + float(i);
+                \\    data[i] = data[i] * scale[0] + float(i);
                 \\}
                 ,
                 .glsl =
                 \\#version 450
                 \\layout(local_size_x = {threads}) in;
                 \\layout(std430, binding = 0) buffer Data { float data[]; };
-                \\layout(binding = 1) uniform Scale { float scale; };
+                \\layout(std430, binding = 1) readonly buffer Scale { float scale[]; };
                 \\void main() {
                 \\    uint i = gl_GlobalInvocationID.x;
-                \\    data[i] = data[i] * scale + float(i);
+                \\    data[i] = data[i] * scale[0] + float(i);
                 \\}
                 ,
                 .hlsl =
                 \\RWStructuredBuffer<float> data : register(u0);
-                \\cbuffer Scale : register(b0) { float scale; };
+                \\StructuredBuffer<float> scale : register(t0);
                 \\[numthreads({threads}, 1, 1)]
                 \\void {name}(uint3 gid : SV_DispatchThreadID) {
                 \\    uint i = gid.x;
-                \\    data[i] = data[i] * scale + float(i);
+                \\    data[i] = data[i] * scale[0] + float(i);
                 \\}
                 ,
             },
@@ -144,5 +144,37 @@ pub fn main(init: std.process.Init) !void {
         if (@abs(v - want) > 1e-3) ok = false;
     }
     try out.print("\ncpu dispatch of {d} invocations on 4 threads: {s} (data[3] = {d})\n", .{ n, if (ok) "correct" else "WRONG", data[3] });
+
+    // ------------------------------------------------------ devices, for real
+    //
+    // `openDevice` is the call `dispatch` makes for itself. When a backend
+    // really opens here, the kernel runs on it and the numbers are checked —
+    // this is the end-to-end verification, not a stub.
+    try out.print("\ndevices:\n", .{});
+    for (zb.ALL) |b| {
+        const maybe = try zb.openDevice(b);
+        if (maybe == null) {
+            try out.print("  {s:<8} not available on this machine\n", .{b.name()});
+            continue;
+        }
+        var dev = maybe.?;
+        defer dev.deinit();
+        if (!Scale.kernel.canRun(b)) {
+            try out.print("  {s:<8} open, but the kernel has no {s} code\n", .{ b.name(), b.name() });
+            continue;
+        }
+        for (data, 0..) |*v, i| v.* = @floatFromInt(i);
+        var device_ctx = zb.KernelCtx{ .buffers = &buffers, .count = n, .threads = 64, .alloc = alloc };
+        try zb.dispatchOn(&dev, Scale.kernel, &device_ctx);
+        var good = true;
+        for (data, 0..) |v, i| {
+            const want = @as(f32, @floatFromInt(i)) * 2.0 + @as(f32, @floatFromInt(i));
+            if (@abs(v - want) > 1e-3) good = false;
+        }
+        try out.print("  {s:<8} ran 1024 invocations: {s} (data[3] = {d})\n", .{ b.name(), if (good) "correct" else "WRONG", data[3] });
+    }
+    // The cached devices `dispatch` uses are the same handles; closing them is
+    // optional (the process exit does it), but saying so explicitly is tidier.
+    zb.shutdownDevices();
     try out.flush();
 }

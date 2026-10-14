@@ -514,15 +514,26 @@ pub const Error = error{
     Unsupported,
     BackendUnavailable,
     KernelFailed,
+    DeviceFailed,
+    OutOfMemory,
 };
 
-/// Dispatches a portable kernel on `backend`, running the Zig body on the CPU
-/// and falling back to it when no driver is present.
+/// Dispatches a portable kernel on `backend`.
+///
+/// The kernel runs on the device when there is one and the kernel carries code
+/// for it (`Kernel.canRun`); otherwise the Zig body runs on the CPU. That
+/// fallback is silent on purpose — a program written once runs everywhere, and
+/// `probe()` tells the caller what actually happened.
 pub fn dispatch(backend: Backend, kernel: Kernel, ctx: *KernelCtx) Error!void {
-    if (backend != .cpu) {
-        const rt = open(backend) orelse return dispatch(.cpu, kernel, ctx);
-        if (!rt.caps.compute) return dispatch(.cpu, kernel, ctx);
+    if (backend != .cpu and kernel.canRun(backend)) {
+        if (try device(backend)) |dev| return dispatchOn(dev, kernel, ctx);
     }
+    return runCpu(kernel, ctx);
+}
+
+/// Runs the Zig body once per invocation, in order — the CPU backend, and the
+/// fallback of every other backend.
+pub fn runCpu(kernel: Kernel, ctx: *KernelCtx) Error!void {
     var id: usize = 0;
     while (id < ctx.count) : (id += 1) {
         ctx.id = id;
@@ -573,6 +584,172 @@ fn workerBody(kernel: Kernel, ctx: *KernelCtx, slice: usize, workers: usize, fai
             return;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Devices: opening a driver and dispatching on it
+// ---------------------------------------------------------------------------
+
+const vulkan = @import("backend/vulkan.zig");
+const webgpu = @import("backend/webgpu.zig");
+
+/// A live connection to a backend.
+///
+/// `open` describes a driver; a `Device` is an open one. Only `.cpu`,
+/// `.vulkan` and `.webgpu` have an implementation today; the other two exist so
+/// the tag set matches `Backend` (and so `Device.deinit` needs no `else`).
+pub const Device = union(Backend) {
+    // Field order must match `Backend`'s; Zig checks it at comptime.
+    cpu: void,
+    webgpu: webgpu.Device,
+    metal: void,
+    vulkan: vulkan.Device,
+    d3d12: void,
+
+    /// The backend this device drives.
+    pub fn backend(self: Device) Backend {
+        return self;
+    }
+
+    pub fn deinit(self: *Device) void {
+        switch (self.*) {
+            .vulkan => |*d| d.deinit(),
+            .webgpu => |*d| d.deinit(),
+            .cpu, .metal, .d3d12 => {},
+        }
+    }
+};
+
+/// Opens a driver for `backend`: `null` when this machine cannot run it (no
+/// library, no adapter, no device), an error only when something went wrong
+/// while opening.
+pub fn openDevice(backend: Backend) Error!?Device {
+    return switch (backend) {
+        .cpu => Device{ .cpu = {} },
+        .vulkan => if (vulkan.Device.open(null) catch |e| return mapDeviceError(e)) |d| Device{ .vulkan = d } else null,
+        .webgpu => if (webgpu.Device.open() catch |e| return mapDeviceError(e)) |d| Device{ .webgpu = d } else null,
+        .metal, .d3d12 => null,
+    };
+}
+
+/// Devices opened on demand and kept for the process lifetime.
+///
+/// Creating an instance and a device costs milliseconds; a numeric library
+/// dispatches thousands of kernels per second, so `dispatch` opens each backend
+/// once instead of once per call. The state machine is lock-free: a thread that
+/// finds another thread mid-open does not wait, it just falls back to the CPU
+/// for that dispatch (`docs/features/09-backends.md` explains the choice).
+const cache = struct {
+    var slots: [ALL.len]Slot = @splat(.{});
+
+    const Slot = struct {
+        state: std.atomic.Value(State) = .init(.unopened),
+        device: ?Device = null,
+    };
+
+    const State = enum(u8) { unopened, opening, opened, unavailable };
+};
+
+/// The process-wide device for `backend`, opening it on first use.
+///
+/// `null` means the backend cannot run here — no library, no device, or another
+/// thread is opening it right now. The returned pointer stays valid until
+/// `shutdownDevices`.
+pub fn device(backend: Backend) Error!?*Device {
+    const slot = &cache.slots[@backingInt(backend)];
+    switch (slot.state.load(.acquire)) {
+        .opened => return if (slot.device) |*d| d else null,
+        .unavailable, .opening => return null,
+        .unopened => {},
+    }
+    if (slot.state.cmpxchgStrong(.unopened, .opening, .acq_rel, .acquire) != null) {
+        // Another thread owns the open; this call stays on the CPU.
+        return if (slot.device) |*d| d else null;
+    }
+    errdefer slot.state.store(.unavailable, .release);
+    if (try openDevice(backend)) |d| {
+        slot.device = d;
+        slot.state.store(.opened, .release);
+    } else {
+        slot.state.store(.unavailable, .release);
+    }
+    return if (slot.device) |*d| d else null;
+}
+
+/// Closes every cached device; the next `device` call reopens what it needs.
+/// Call it at shutdown, or between tests — never while a dispatch is running.
+pub fn shutdownDevices() void {
+    for (&cache.slots) |*slot| {
+        if (slot.device) |*d| d.deinit();
+        slot.device = null;
+        slot.state.store(.unopened, .release);
+    }
+}
+
+/// Runs `kernel` on an already open device.
+///
+/// The CPU device runs the Zig body. The GPU devices run the kernel's shader
+/// code, which means copying each `KernelCtx.buffer` to the device and back —
+/// one-shot buffers, so a dispatch is not free. Device-resident buffers are the
+/// next step for these backends.
+pub fn dispatchOn(dev: *Device, kernel: Kernel, ctx: *KernelCtx) Error!void {
+    switch (dev.*) {
+        .cpu, .metal, .d3d12 => return runCpu(kernel, ctx),
+        .vulkan => |*d| return dispatchVulkan(d, kernel, ctx),
+        .webgpu => |*d| return dispatchWebgpu(d, kernel, ctx),
+    }
+}
+
+/// The name of the shader entry point every GPU backend expects: WGSL must
+/// declare `@compute fn main(...)`, SPIR-V must have an entry point `main`.
+pub const entry_point = "main";
+
+fn dispatchVulkan(d: *vulkan.Device, kernel: Kernel, ctx: *KernelCtx) Error!void {
+    const spirv = kernel.spirv orelse return Error.Unsupported;
+    const alloc = ctx.alloc;
+    const allocs = try alloc.alloc(vulkan.Device.Allocation, ctx.buffers.len);
+    defer alloc.free(allocs);
+    var created: usize = 0;
+    defer for (allocs[0..created]) |a| d.free(a);
+    for (ctx.buffers, 0..) |b, i| {
+        allocs[i] = d.allocBuffer(b.len) catch |e| return mapDeviceError(e);
+        created += 1;
+        d.upload(allocs[i], b.ptr[0..b.len]);
+    }
+    const bindings = try alloc.alloc(vulkan.Device.BufferBinding, ctx.buffers.len);
+    defer alloc.free(bindings);
+    for (allocs, 0..) |a, i| bindings[i] = .{ .buffer = a.buffer, .size = a.size };
+    d.dispatchCompute(spirv, bindings, ctx.count, ctx.threads) catch |e| return mapDeviceError(e);
+    // Host-coherent memory: the device's writes are already visible.
+    for (ctx.buffers, 0..) |b, i| d.download(allocs[i], b.ptr[0..b.len]);
+}
+
+fn dispatchWebgpu(d: *webgpu.Device, kernel: Kernel, ctx: *KernelCtx) Error!void {
+    const alloc = ctx.alloc;
+    const wgsl = (try kernel.lower(.webgpu, alloc, ctx.threads)) orelse return Error.Unsupported;
+    defer alloc.free(wgsl);
+    const allocs = try alloc.alloc(webgpu.Device.Allocation, ctx.buffers.len);
+    defer alloc.free(allocs);
+    var created: usize = 0;
+    defer for (allocs[0..created]) |a| d.destroyBuffer(a);
+    for (ctx.buffers, 0..) |b, i| {
+        allocs[i] = d.createBuffer(b.len) catch |e| return mapDeviceError(e);
+        created += 1;
+        // Buffers are created mapped: write, then unmaps so the GPU may read.
+        d.upload(allocs[i], b.ptr[0..b.len]);
+        d.commit(allocs[i]);
+    }
+    d.run(alloc, wgsl, entry_point, allocs, ctx.count, ctx.threads) catch |e| return mapDeviceError(e);
+    for (ctx.buffers, 0..) |b, i| d.download(allocs[i], b.ptr[0..b.len]) catch |e| return mapDeviceError(e);
+}
+
+/// Device failures collapse into one backend error; allocation failures keep
+/// their own name because callers handle them differently.
+fn mapDeviceError(e: anyerror) Error {
+    return switch (e) {
+        error.OutOfMemory => Error.OutOfMemory,
+        else => Error.DeviceFailed,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +891,50 @@ test "canRun decides per backend" {
     const spirv = Kernel{ .name = "k", .body = base.body, .spirv = &.{ 0x07230203, 0, 1, 0 } };
     try testing.expect(spirv.canRun(.vulkan));
     try testing.expect(!spirv.canRun(.webgpu));
+}
+
+test "the cpu device is always openable and runs the zig body" {
+    var dev = (try openDevice(.cpu)).?;
+    defer dev.deinit();
+    try testing.expectEqual(Backend.cpu, dev.backend());
+
+    const Fill = struct {
+        fn body(ctx: *KernelCtx) void {
+            ctx.buffers[0].as(f64)[ctx.id] = @floatFromInt(ctx.id);
+        }
+    };
+    var data: [16]f64 = @splat(0);
+    var bufs = [_]Buffer{.{ .ptr = @ptrCast(&data), .len = @sizeOf(@TypeOf(data)) }};
+    var ctx = KernelCtx{ .buffers = &bufs, .count = data.len, .alloc = testing.allocator };
+    try dispatchOn(&dev, .{ .name = "fill", .body = Fill.body }, &ctx);
+    for (data, 0..) |v, i| try testing.expectEqual(@as(f64, @floatFromInt(i)), v);
+}
+
+test "a backend that cannot be opened falls back to the cpu" {
+    const Fill = struct {
+        fn body(ctx: *KernelCtx) void {
+            ctx.buffers[0].as(f64)[ctx.id] = @floatFromInt(ctx.id);
+        }
+    };
+    // Real SPIR-V would run on a real driver; this is a placeholder, so the
+    // machine either has no Vulkan (the usual case, and the one under test) or
+    // the kernel still must not corrupt the host buffer.
+    const kernel = Kernel{ .name = "fill", .body = Fill.body, .spirv = &.{ 0x07230203, 0, 1, 0 } };
+    for ([_]Backend{ .vulkan, .webgpu, .metal, .d3d12 }) |b| {
+        if (try device(b) != null) continue;
+        var data: [16]f64 = @splat(0);
+        var bufs = [_]Buffer{.{ .ptr = @ptrCast(&data), .len = @sizeOf(@TypeOf(data)) }};
+        var ctx = KernelCtx{ .buffers = &bufs, .count = data.len, .alloc = testing.allocator };
+        try dispatch(b, kernel, &ctx);
+        for (data, 0..) |v, i| try testing.expectEqual(@as(f64, @floatFromInt(i)), v);
+    }
+}
+
+test "devices are opened once and kept" {
+    const first = try device(.cpu);
+    const second = try device(.cpu);
+    try testing.expect(first != null);
+    try testing.expect(first == second);
 }
 
 test "available() lists the cpu backend at least" {
