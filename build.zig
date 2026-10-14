@@ -19,12 +19,9 @@ const builtin = @import("builtin");
 /// docs) are wired up only when their sources are present, so a partial checkout
 /// still builds.
 fn exists(b: *std.Build, rel: []const u8) bool {
-    const cwd = std.Io.Dir.cwd();
-    cwd.access(b.graph.io, rel, .{}) catch {
-        // Fall back to the build root when the caller built from elsewhere.
-        _ = b.root;
-        return false;
-    };
+    // Resolved against the build root, not the process cwd, so `zig build` works
+    // from any directory.
+    b.root.access(b.graph.io, rel, .{}) catch return false;
     return true;
 }
 
@@ -174,7 +171,15 @@ pub fn build(b: *std.Build) void {
 
     // -------------------------------------------------------------------- checks
     const check_step = b.step("check", "Formatting check plus the full test suite");
-    const fmt_check = b.addFmt(.{ .paths = &.{ b.path("src"), b.path("bench"), b.path("docs"), b.path("examples"), b.path("build.zig") }, .check = true });
+    // only format what is actually present, so a partial checkout still checks
+    var fmt_paths: [5]std.Build.LazyPath = undefined;
+    var fmt_count: usize = 0;
+    for ([_][]const u8{ "src", "bench", "docs", "examples", "build.zig" }) |rel| {
+        if (!exists(b, rel)) continue;
+        fmt_paths[fmt_count] = b.path(rel);
+        fmt_count += 1;
+    }
+    const fmt_check = b.addFmt(.{ .paths = fmt_paths[0..fmt_count], .check = true });
     check_step.dependOn(&fmt_check.step);
     check_step.dependOn(&run_unit_tests.step);
     _ = builtin;

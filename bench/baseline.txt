@@ -1,0 +1,15 @@
+# zpu benchmark baseline — written by `zig build bench -- --write-baseline`
+# machine specific: re-record after changing CPU, compiler or kernel.
+# format: <case name> <rate>
+add f32 [1M] 7.560983
+mul f64 [1M] 9.457085
+exp f32 [1M] 0.691683
+sum f32 [1M] 1.599372
+matmul f32 512x512x512 3.144934
+matmul f64 256x256x256 3.097307
+batch matmul f32 64x32x32 2.906163
+conv2d f32 1x3x32x32 k3 0.060903
+layerNorm f32 [64,64] 0.365239
+grad MLP f32 (batch 64) 562.932765
+adam step MLP f32 428.594652
+jit(grad MLP) f32 954.116912
