@@ -21,6 +21,11 @@ const builtin = @import("builtin");
 fn exists(b: *std.Build, rel: []const u8) bool {
     // Resolved against the build root, not the process cwd, so `zig build` works
     // from any directory.
+    //
+    // Note for whoever adds a file: the build runner caches the *result* of this
+    // probe (keyed by `build.zig`), so a newly added example or a fresh checkout
+    // that reuses a build cache may not see it until `build.zig` is touched or
+    // the cache is dropped (`rm -rf .zig-cache`). CI always starts clean.
     b.root.access(b.graph.io, rel, .{}) catch return false;
     return true;
 }
