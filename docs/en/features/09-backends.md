@@ -61,6 +61,18 @@ if (try zb.openDevice(.vulkan)) |dev| {
     defer device.deinit();
     try zb.dispatchOn(&device, kernel, &ctx);
 }
+
+// 6. when the same data goes round and round, leave it on the device: no
+//    upload, no download, no allocation, and no pipeline compile per dispatch.
+if (try zb.device(.vulkan)) |dev| {
+    var weights = try zb.createDeviceBuffer(dev, 4096, alloc);
+    defer zb.destroyDeviceBuffer(dev, &weights);
+    try zb.writeDeviceBuffer(dev, &weights, host_bytes);        // once
+    for (0..1000) |_| {
+        try zb.dispatchDeviceBuffers(dev, kernel, &.{&weights}, 1024, 64);
+    }
+    try zb.readDeviceBuffer(dev, &weights, into_host);          // when needed
+}
 ```
 
 `zig build run-gpu-probe` prints the table above, lowers the same kernel into five
@@ -147,6 +159,23 @@ pipeline is built there) and the average of the ones after it.
   invocations, 200 dispatches): 1975–2160 µs per dispatch without the cache,
   60–85 µs with it.
 
+* **Data that should stay put goes in a `DeviceBuffer`.** `dispatch` and
+  `dispatchOn` send every `KernelCtx.buffer` to the device, run, and read it back
+  — the right default for tensors that live in host memory, and a waste in a loop
+  over the same data. `createDeviceBuffer` / `writeDeviceBuffer` /
+  `dispatchDeviceBuffers` / `readDeviceBuffer` allocate and transfer once and keep
+  the data on the device meanwhile. The one-shot path also draws its buffers from
+  the device's pool and its descriptor arrays from the stack, so a warm device
+  sees no allocation at all. Measured here (SwiftShader, 1024 invocations, five
+  runs): 28.2 / 36.0 / 40.5 / 35.8 / 29.5 µs per dispatch on a resident buffer,
+  against 30.9 / 36.1 / 31.2 / 29.1 / 33.2 µs when the host buffers are copied in
+  and out — on a software implementation the two are the same, because "device
+  memory" is host memory, the copy is a memcpy, and submit plus fence wait
+  dominate. The gap appears on real hardware, where the question is whether every
+  dispatch pays for a transfer over PCIe. Speed is not the only thing a
+  `DeviceBuffer` buys: a loop that reuses one allocation never touches the
+  driver's memory manager, so there is no churn and no OOM jitter.
+
 * **The workgroup size comes from the module.** `@workgroup_size` is baked into
   the bytecode, so trusting the caller's `threads` would leave invocations
   unrun. `spirv.localSize()` reads `OpExecutionMode LocalSize`, and that value
@@ -226,12 +255,20 @@ cannot run, and (5) CPU execution equivalence.
 * **Do not use uniforms.** Even a small constant goes into a storage buffer
   (`var<storage, read> scale: array<f32>;`), because the backends describe every
   buffer as a storage buffer.
-* **The GPU path copies buffers on every dispatch.** Each call allocates device
-  memory, uploads from the host, runs and reads back. The pipeline, the
-  descriptors and the command buffer are cached, so what remains is that round
-  trip plus submit and fence. Device-resident buffers (`DeviceBuffer`) are the
-  next step; until then a hot loop is best served by calling `dispatchOn`
-  directly.
+* **Tensors in host memory travel on every dispatch.** `dispatch` sends the
+  buffers, runs, and reads them back. The allocation comes from the pool, the
+  descriptor arrays from the stack and the pipeline from the cache, so what
+  remains is the transfer plus submit and fence. Data that goes round in a loop
+  belongs in a `DeviceBuffer`, which removes the round trip as well (keeping the
+  numeric core's tensors resident is the next step; today a loop calls the kernel
+  directly).
 * Close a device with `Device.deinit` (the value `openDevice` handed out) or
   `zpu.shutdownDevices()` (the process-wide cache) — never while a dispatch is
   running.
+* **A `DeviceBuffer` dies when it is released.** Reading, writing or dispatching
+  with a dead buffer, or with one from another device, fails with
+  `Error.InvalidBuffer`; calling `destroyDeviceBuffer` twice is harmless. The
+  memory goes back to the device's pool, so the next allocation of a similar size
+  does not trouble the driver.
+* `dispatchDeviceBuffers` binds at most 16 buffers per dispatch
+  (`RunBuffers.max`); no kernel in the library needs more.

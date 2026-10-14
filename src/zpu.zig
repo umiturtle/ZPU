@@ -132,6 +132,37 @@ pub const Kernel = zbackend.Kernel;
 pub const KernelCtx = zbackend.KernelCtx;
 pub const dispatchKernel = zbackend.dispatch;
 pub const dispatchKernelThreaded = zbackend.dispatchThreaded;
+pub const dispatchOn = zbackend.dispatchOn;
+
+// ---- devices ----------------------------------------------------------------
+// Tensors live in host memory, so the kernels above copy them to the device and
+// back on every dispatch. When the same data goes round in a loop, keep it on
+// the device instead: allocate a `DeviceBuffer`, write it once, dispatch as
+// often as you like, read it back when the numbers are needed. See
+// `docs/features/09-backends.md`.
+/// Opens a driver for good (`null` when this machine cannot run it).
+pub const openDevice = zbackend.openDevice;
+/// The process-wide device of a backend, opened on first use.
+pub const device = zbackend.device;
+/// Closes every device this process opened.
+pub const shutdownDevices = zbackend.shutdownDevices;
+/// Memory that stays on the device between dispatches.
+pub const DeviceBuffer = zbackend.DeviceBuffer;
+/// Allocates a device buffer of `size` bytes (from the device's pool when it can).
+pub const createDeviceBuffer = zbackend.createBuffer;
+/// Releases a device buffer; safe to call twice.
+pub const destroyDeviceBuffer = zbackend.destroyBuffer;
+/// Copies `bytes` into a device buffer (at most the buffer's size).
+pub const writeDeviceBuffer = zbackend.writeBuffer;
+/// Copies a device buffer out into `bytes` (at most the buffer's size).
+pub const readDeviceBuffer = zbackend.readBuffer;
+/// Runs a kernel on device buffers: no upload, no download, no allocation.
+pub const dispatchDeviceBuffers = zbackend.dispatchBuffers;
+/// Points a backend at one specific driver library (a software rasterizer, a
+/// non-standard ICD, a browser's WebGPU build); `null` restores the defaults.
+pub const setDriverLibrary = zbackend.setDriverLibrary;
+/// The same, read from `ZPU_VULKAN_LIB` / `ZPU_WEBGPU_LIB` / `VK_ICD_FILENAMES`.
+pub const configureFromEnvironment = zbackend.configureFromEnvironment;
 
 // ---- op surface -------------------------------------------------------------
 pub const broadcastPair = ops.broadcastPair;

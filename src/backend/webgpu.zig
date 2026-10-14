@@ -496,6 +496,9 @@ pub const Device = struct {
     adapter: WGPUAdapter,
     handle: WGPUDevice,
     queue: WGPUQueue,
+    /// Buffers handed back after a dispatch, kept for the next one of a
+    /// compatible size (the same idea as the Vulkan device's pool).
+    pool: [max_pool]?Allocation = @splat(null),
 
     /// A buffer plus the host size the caller asked for.
     pub const Allocation = struct {
@@ -565,6 +568,10 @@ pub const Device = struct {
     }
 
     pub fn deinit(self: *Device) void {
+        for (&self.pool) |*slot| {
+            if (slot.*) |a| self.destroyBuffer(a);
+            slot.* = null;
+        }
         self.loader.device_destroy(self.handle);
         self.loader.device_release(self.handle);
         self.loader.adapter_release(self.adapter);
@@ -579,7 +586,7 @@ pub const Device = struct {
 
     /// Creates a device buffer big enough for `size` bytes and maps it for the
     /// caller's whole lifetime.
-    pub fn createBuffer(self: *const Device, size: usize) Error!Allocation {
+    pub fn createBuffer(self: *Device, size: usize) Error!Allocation {
         const desc = BufferDescriptor{
             .label = StringView.cstr("zpu buffer"),
             .usage = Usage.storage | Usage.copy_src | Usage.copy_dst | Usage.map_write | Usage.map_read,
@@ -590,7 +597,35 @@ pub const Device = struct {
         return .{ .buffer = buf, .size = size };
     }
 
-    pub fn destroyBuffer(self: *const Device, alloc: Allocation) void {
+    /// The most freed buffers a device holds on to.
+    pub const max_pool = 8;
+
+    /// A buffer of at least `size` bytes: one from the pool when there is one
+    /// that fits, otherwise a fresh allocation.
+    pub fn acquire(self: *Device, size: usize) Error!Allocation {
+        for (&self.pool) |*slot| {
+            if (slot.*) |cached| {
+                if (cached.size >= size) {
+                    slot.* = null;
+                    return cached;
+                }
+            }
+        }
+        return self.createBuffer(size);
+    }
+
+    /// Hands a buffer back to the pool; frees it when the pool is full.
+    pub fn release(self: *Device, alloc: Allocation) void {
+        for (&self.pool) |*slot| {
+            if (slot.* == null) {
+                slot.* = alloc;
+                return;
+            }
+        }
+        self.destroyBuffer(alloc);
+    }
+
+    pub fn destroyBuffer(self: *Device, alloc: Allocation) void {
         self.loader.buffer_release(alloc.buffer);
     }
 

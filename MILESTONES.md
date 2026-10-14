@@ -114,10 +114,23 @@ ZPU は 2 つのライブラリを 1 つのリポジトリで育てる。
       compute pass、`map_async` 読み戻し（`src/backend/webgpu.zig`）
 * [x] GPU が無い環境では `openDevice` が `null` を返し、`dispatch` は CPU に落ちる
       （テストはそのまま green）
-* [ ] **GPU 実機での検証**: `zig build run-gpu-probe` が各デバイスを開いて
-      1024 要素のカーネルを実行し、数値を検査する（この開発環境は GPU 無し）
-* [ ] パイプラインのキャッシュ（今はディスパッチごとに作って壊す）
-* [ ] デバイス常駐バッファ（今は毎回ホストと往復する）
+* [x] **実デバイスでの検証**: `zig build run-gpu-probe` が各デバイスを開いて
+      1024 要素のカーネルを実行し数値を検査する。この開発環境には GPU が無いので
+      ソフトウェア Vulkan（SwiftShader）を入れ、`ZPU_VULKAN_LIB=` で
+      ドライバを指定して実際にディスパッチを通した（実測値は docs/features/09
+      に記載）。GPU のあるマシンではローダと ICD が既にあるため
+      `zig build run-gpu-probe` だけで同じ検査が走る
+* [x] Vulkan の段階解決（global → instance → device、`vkGetDeviceProcAddr`）と
+      ICD 直接ロード、Linux の multiarch ディレクトリ探索、ドライバの明示
+      （`setDriverLibrary` / `ZPU_VULKAN_LIB` / `ZPU_WEBGPU_LIB` /
+      `VK_ICD_FILENAMES` / `VK_DRIVER_FILES`）
+* [x] パイプラインのキャッシュ（SPIR-V のハッシュ + バッファ数で 4 スロット、
+      記述子セット・プール・コマンドバッファ・フェンスも使い回す。実測で
+      1975–2160 µs → 60–85 µs/回）
+* [x] デバイス常駐バッファ（`createDeviceBuffer` / `writeDeviceBuffer` /
+      `dispatchDeviceBuffers` / `readDeviceBuffer`、デバイスごとのバッファプール。
+      実測で往復 52–55 µs ↔ 常駐 37–43 µs/回）
+* [ ] 数値コアのテンソルをデバイス常駐させる（今はカーネルを直接呼ぶ経路のみ）
 * [ ] Direct3D 12 / Metal の実行（上記 2 つが固まってから）
 * [ ] `zgf` から `zbackend` 経由で GPU 実行する経路
 
@@ -138,7 +151,7 @@ ZPU は 2 つのライブラリを 1 つのリポジトリで育てる。
       `zig-out/doc` を成果物として保存
 * [x] GitHub Pages への配信（`.github/workflows/pages.yml`、`main` への push で公開）
 * [x] Zig のバージョンは 0.17.0 に固定（CI が ziglang.org から取得）
-* [ ] `build.zig.zon` の `minimum_zig_version` を 0.17.0 に合わせる
+* [x] `build.zig.zon` の `minimum_zig_version` を 0.17.0 に合わせる（済）
 * [ ] ベンチ結果を CI のログに残す（回帰検出は `--check` で失敗させる）
 * [ ] Pages の有効化（リポジトリ設定）と、最初の green な run の確認
 
@@ -149,9 +162,10 @@ ZPU は 2 つのライブラリを 1 つのリポジトリで育てる。
       `build.zig` に残っていた未使用の調査オプションも削除した）
 * [ ] Zig 0.17 のイディオム見直し（`std.Io`、エラーセット、`@splat`、`inline for`）
 * [ ] 公開 API の doc コメント網羅（`zig build doc` の警告ゼロ）
-* [ ] `examples/` の充実 — `build.zig` が名前を挙げている 8 本のうち
-      `gpu-probe` 以外（`tensors` / `autodiff` / `train-mlp` / `images` /
-      `vector-art` / `render3d` / `diff-render` / `serve_demo`）を書く
+* [ ] `examples/` の充実 — `build.zig` が名前を挙げている 8 本のうち、
+      書けたのは `gpu-probe` の 1 本。残り 7 本（`tensors` / `autodiff` /
+      `train-mlp` / `images` / `vector-art` / `render3d` / `diff-render`）を
+      書く（`serve_demo` は別枠で既にある）
 * [ ] タグ付けとリリースノート
 
 ---

@@ -61,6 +61,18 @@ if (try zb.openDevice(.vulkan)) |dev| {
     defer device.deinit();
     try zb.dispatchOn(&device, kernel, &ctx);
 }
+
+// 6. 同じデータを何度も回すなら、デバイスに置いたままにする。
+//    アップロードもダウンロードも確保も、ディスパッチごとには起きない。
+if (try zb.device(.vulkan)) |dev| {
+    var weights = try zb.createDeviceBuffer(dev, 4096, alloc);
+    defer zb.destroyDeviceBuffer(dev, &weights);
+    try zb.writeDeviceBuffer(dev, &weights, host_bytes);        // 1 回だけ
+    for (0..1000) |_| {
+        try zb.dispatchDeviceBuffers(dev, kernel, &.{&weights}, 1024, 64);
+    }
+    try zb.readDeviceBuffer(dev, &weights, into_host);          // 必要なときだけ
+}
 ```
 
 `zig build run-gpu-probe` は上の表を出力し、同じカーネルを 5 つのシェーディング
@@ -143,6 +155,22 @@ if (try zb.openDevice(.vulkan)) |dev| {
   この環境（SwiftShader、1024 呼び出し、200 回）での実測:
   キャッシュ無し 1975–2160 µs/回 → キャッシュ有り 60–85 µs/回。
 
+* **常駐させたいデータは `DeviceBuffer` に置く。** `dispatch` / `dispatchOn` は
+  `KernelCtx.buffers` をデバイスへ送り、実行し、読み戻す — ホストメモリの
+  テンソルを扱う既定として正しいが、同じデータを回すループでは無駄になる。
+  `createDeviceBuffer` / `writeDeviceBuffer` / `dispatchDeviceBuffers` /
+  `readDeviceBuffer` は、確保も転送も 1 回にして、その間ずっとデバイス側に
+  データを置く。1 回のディスパッチ経路も、デバイスのバッファプールと
+  スタック上の記述子配列を使うので、温まったデバイスでは確保が起きない。
+  この環境（SwiftShader、1024 呼び出し、5 回の実行）での実測:
+  常駐バッファで 28.2 / 36.0 / 40.5 / 35.8 / 29.5 µs、ホストバッファの往復で
+  30.9 / 36.1 / 31.2 / 29.1 / 33.2 µs — **ソフトウェア実装では両者は同じ**
+  （「デバイスメモリ」もホストメモリで、転送は memcpy、支配的なのは
+  submit とフェンス待ち）。差が出るのは本物の GPU で、PCIe 越しの転送を
+  毎回払うかどうかがここで決まる。`DeviceBuffer` の価値は速さだけではない:
+  大きなバッファを繰り返し確保しないので、ドライバのメモリ管理に触れず、
+  OOM の揺れも無い。
+
 * **workgroup サイズはモジュールから読む。** `@workgroup_size` はバイトコードに
   焼き込まれているので、呼び出し側の `threads` を信じると取りこぼしが出る。
   `spirv.localSize()` が `OpExecutionMode LocalSize` を読み、その値で
@@ -219,10 +247,16 @@ Vulkan と WebGPU を先に完成させる。残り 2 つは検出コードと `
 * **uniform は使わない。** 小さな定数も storage buffer として束ねる
   （`var<storage, read> scale: array<f32>;` のように）。バックエンドが全
   バッファを storage として記述子に書くためで、混ぜるとレイアウト不一致になる。
-* **GPU 経路はバッファを毎回往復させる。** ディスパッチ 1 回ごとにデバイス
-  メモリを確保し、ホストから書き、実行し、読み戻して解放する。パイプラインも
-  記述子もコマンドバッファもキャッシュ済みなので、残っているコストはこの往復と
-  submit / fence だけ。デバイス常駐バッファ（`DeviceBuffer`）は次の段階で、
-  それまではホットループで `dispatchOn` を直接使うのが最短。
+* **ホストメモリのテンソルはディスパッチごとに往復する。** `dispatch` は
+  バッファを送り、実行し、読み戻す。確保はプールから、記述子配列はスタックから、
+  パイプラインはキャッシュから来るので、残るのは転送と submit / fence だけ。
+  回し続けるデータは `DeviceBuffer` に置けば、その往復も消える
+  （数値コアのテンソルを常駐させるのは次の段階。今はカーネルを直接呼ぶ）。
 * デバイスを閉じるのは `Device.deinit`（`openDevice` が返した値）か
   `zpu.shutdownDevices()`（プロセス内キャッシュ）。ディスパッチ中に閉じない。
+* **`DeviceBuffer` は解放すると無効になる。** 死んだバッファへの読み書き、
+  別のデバイスのバッファの使用は `Error.InvalidBuffer` で失敗する
+  （2 回 `destroyDeviceBuffer` を呼ぶのは無害）。`Destroy` したバッファは
+  デバイスのプールに戻るので、同じくらいの大きさの次回の確保はドライバを呼ばない。
+* `dispatchDeviceBuffers` は 1 回のディスパッチに最大 16 本まで束ねられる
+  （`RunBuffers.max`）。それ以上要るカーネルは今のところ無い。

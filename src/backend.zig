@@ -80,24 +80,19 @@ pub const ALL: [5]Backend = .{ .webgpu, .metal, .vulkan, .d3d12, .cpu };
 
 /// The dynamic libraries probed for each backend, in the order they are tried.
 /// Loading is done with `std.DynLib`, so no SDK is needed at build time.
+/// The names of the libraries for the backends that have no loader module of
+/// their own: Vulkan and WebGPU keep theirs next to their ABI (see
+/// `candidateList`).
 fn libraryNames(backend: Backend) []const []const u8 {
     return switch (backend) {
         .cpu => &.{},
-        .webgpu => switch (builtin.os.tag) {
-            .windows => &.{"webgpu_dawn.dll"},
-            .macos => &.{ "libwebgpu_dawn.dylib", "/System/Library/Frameworks/WebGPU.framework/WebGPU" },
-            else => &.{"libwebgpu_dawn.so"},
-        },
         .metal => &.{"/System/Library/Frameworks/Metal.framework/Metal"},
-        .vulkan => switch (builtin.os.tag) {
-            .windows => &.{"vulkan-1.dll"},
-            else => &.{ "libvulkan.so.1", "libvulkan.so" },
-        },
         .d3d12 => switch (builtin.os.tag) {
             .windows => &.{ "d3d12.dll", "d3d12core.dll" },
             // Proton / Wine prefixes use the same names.
             else => &.{},
         },
+        .vulkan, .webgpu => &.{},
     };
 }
 
@@ -198,82 +193,138 @@ pub fn probe() Report {
     return report;
 }
 
-/// Driver libraries a program pointed at explicitly, one slot per backend.
-var overrides: [ALL.len]?[]const u8 = @splat(null);
-
-/// Points a backend at a specific driver library: a bare name searched on the
-/// platform's library path, or an absolute path.
+/// Driver libraries a program pointed at itself or through the environment, one
+/// slot per backend: a name that comes first, plus extra candidates that come
+/// after the platform's own names.
 ///
-/// Use it for the drivers the default list cannot know about — a software
-/// rasterizer such as SwiftShader, an ICD named in `VK_DRIVER_FILES`, MoltenVK,
-/// a browser's WebGPU implementation. `null` restores the platform defaults.
+/// The strings are copied into fixed buffers, so the caller's environment (or
+/// its temporary slice) can go away afterwards.
+const DriverChoice = struct {
+    named: [max_path]u8 = @splat(0),
+    named_len: u8 = 0,
+    extras: [max_extra][max_path]u8 = @splat(@splat(0)),
+    extra_lens: [max_extra]u8 = @splat(0),
+    extra_count: u8 = 0,
+};
+
+/// The longest driver path this layer remembers.
+pub const max_path = 256;
+/// How many extra candidates one backend can carry (the ICD variables).
+pub const max_extra = 4;
+/// The longest list `candidateList` can produce.
+pub const max_candidates = max_extra + 8;
+
+var choices: [ALL.len]DriverChoice = @splat(.{});
+
+fn copyPath(dst: []u8, path: []const u8) u8 {
+    const len = @min(path.len, dst.len);
+    @memcpy(dst[0..len], path[0..len]);
+    return @intCast(len);
+}
+
+/// Points a backend at one driver library, tried before the platform's own
+/// names: a bare name searched on the platform's library path, or an absolute
+/// path.
+///
+/// Use it for drivers the default list cannot know about — a software rasterizer
+/// such as SwiftShader (`libvk_swiftshader.so`), an ICD named in
+/// `VK_DRIVER_FILES`, MoltenVK, a browser's WebGPU implementation. `null`
+/// restores the platform defaults.
 ///
 /// Because the probe result is cached per thread, set this before the first
 /// `probe()` (or before `zpu.init`); it only affects probes and `open` calls
-/// that happen afterwards. Programs that have `std.process.Init` can call
+/// that happen afterwards. Programs that have a `std.process.Init` can call
 /// `configureFromEnvironment` instead of reading variables themselves.
 pub fn setDriverLibrary(backend: Backend, library: ?[]const u8) void {
-    overrides[@backingInt(backend)] = library;
+    const slot = &choices[@backingInt(backend)];
+    if (library) |path| {
+        slot.named_len = copyPath(&slot.named, path);
+    } else {
+        slot.named_len = 0;
+    }
 }
 
-fn driverOverride(backend: Backend) ?[]const u8 {
-    return overrides[@backingInt(backend)];
+/// Adds a candidate that is tried *after* the platform's own names. This is how
+/// a Vulkan ICD named in the environment gets used on a machine with no loader
+/// installed.
+pub fn addDriverLibrary(backend: Backend, library: []const u8) void {
+    const slot = &choices[@backingInt(backend)];
+    if (slot.extra_count >= max_extra) return;
+    const index = slot.extra_count;
+    slot.extra_lens[index] = copyPath(&slot.extras[index], library);
+    slot.extra_count += 1;
+}
+
+/// The libraries `backend` is tried with, in order: the named one, then the
+/// platform's names, then the extra candidates. Written into `buf`, which the
+/// caller owns, so this allocates nothing.
+pub fn candidateList(backend: Backend, buf: *[max_candidates][]const u8) []const []const u8 {
+    const slot = &choices[@backingInt(backend)];
+    var n: usize = 0;
+    if (slot.named_len != 0) {
+        buf[n] = slot.named[0..slot.named_len];
+        n += 1;
+    }
+    const platform = switch (backend) {
+        // The Vulkan and WebGPU lists live with their loader code, which is
+        // where the per-platform names are.
+        .vulkan => vulkan.libraryNames(),
+        .webgpu => webgpu.libraryNames(),
+        else => libraryNames(backend),
+    };
+    for (platform) |name| {
+        if (n == buf.len) break;
+        buf[n] = name;
+        n += 1;
+    }
+    for (0..slot.extra_count) |i| {
+        if (n == buf.len) break;
+        buf[n] = slot.extras[i][0..slot.extra_lens[i]];
+        n += 1;
+    }
+    return buf[0..n];
 }
 
 /// Reads the usual variables out of a program's environment and points the
 /// backends at what they name:
 ///
 /// * `ZPU_VULKAN_LIB` / `ZPU_WEBGPU_LIB` — a library name or an absolute path,
-/// * `VK_DRIVER_FILES` / `VK_ICD_FILENAMES` — the standard Vulkan variables; the
-///   first entry that names a library (not a JSON manifest) is used, because a
-///   Vulkan driver can be loaded directly, without the loader in between.
+///   tried before the platform's own names,
+/// * `VK_DRIVER_FILES` / `VK_ICD_FILENAMES` — the standard Vulkan variables,
+///   tried after them. The standard use is to name ICD manifests (`.json`),
+///   which only a loader can resolve; ZPU skips those and takes the entries that
+///   name a library, because a Vulkan driver exports `vkGetInstanceProcAddr`
+///   itself and can be driven directly on a machine with no loader.
 ///
-/// The map must outlive the backends' use (the strings are borrowed).
+/// Call this early — before the first `probe()` — because the probe result is
+/// cached per thread.
 pub fn configureFromEnvironment(environ_map: *std.process.Environ.Map) void {
     if (environ_map.get("ZPU_VULKAN_LIB")) |path| setDriverLibrary(.vulkan, path);
     if (environ_map.get("ZPU_WEBGPU_LIB")) |path| setDriverLibrary(.webgpu, path);
-    if (driverOverride(.vulkan) != null) return;
-    const keys = [_][]const u8{ "VK_DRIVER_FILES", "VK_ICD_FILENAMES" };
+    const keys = [_][]const u8{ "VK_ICD_FILENAMES", "VK_DRIVER_FILES" };
     for (keys) |key| {
-        if (driverOverride(.vulkan) != null) break;
         const value = environ_map.get(key) orelse continue;
-        var it = std.mem.tokenizeAny(u8, value, " \t:");
+        var it = std.mem.tokenizeAny(u8, value, ":; \t");
         while (it.next()) |entry| {
-            // A JSON manifest has to be resolved by a loader; a library path can
-            // be driven directly, which is what this layer does.
             if (std.mem.endsWith(u8, entry, ".json")) continue;
-            setDriverLibrary(.vulkan, entry);
-            break;
+            addDriverLibrary(.vulkan, entry);
         }
     }
 }
 
-/// The first library that opens for `backend`: an explicitly configured driver
-/// wins, otherwise the platform's list is tried in order.
-fn openLibrary(backend: Backend) ?std.DynLib {
-    if (driverOverride(backend)) |path| return std.DynLib.open(path) catch null;
-    for (libraryNames(backend)) |name| {
-        if (std.DynLib.open(name) catch null) |lib| return lib;
-    }
-    return null;
-}
-
+/// The first library that opens for `backend`, and what the probe saw in it.
 fn probeBackend(backend: Backend) Info {
-    if (backend == .vulkan) return vulkanInfo();
-    const library = driverOverride(backend) orelse null;
-    if (library) |path| {
-        var lib = std.DynLib.open(path) catch return .{};
-        defer lib.close();
-        var info = Info{ .available = true, .library_path = path };
-        probeLib(backend, &lib, &info);
-        return info;
-    }
-    for (libraryNames(backend)) |name| {
+    var buf: [max_candidates][]const u8 = undefined;
+    for (candidateList(backend, &buf)) |name| {
+        if (backend == .vulkan) {
+            if (vulkanInfoFrom(name)) |info| return info;
+            continue;
+        }
         var lib = std.DynLib.open(name) catch continue;
         defer lib.close();
         var info = Info{ .available = true, .library_path = name };
         probeLib(backend, &lib, &info);
-        return info;
+        if (info.available) return info;
     }
     return .{};
 }
@@ -281,16 +332,6 @@ fn probeBackend(backend: Backend) Info {
 /// The Vulkan probe lives in the device module, with the ABI: creating an
 /// instance and enumerating physical devices is exactly what `vulkan.probe`
 /// does. This copies the fixed-size result into an `Info`.
-fn vulkanInfo() Info {
-    if (driverOverride(.vulkan)) |path| return vulkanInfoFrom(path) orelse .{};
-    // The same list the device loader walks, so the report and the device agree
-    // on what "available" means.
-    for (vulkan.libraryNames()) |name| {
-        if (vulkanInfoFrom(name)) |info| return info;
-    }
-    return .{};
-}
-
 fn vulkanInfoFrom(path: []const u8) ?Info {
     const probed = vulkan.probe(path) orelse return null;
     var info = Info{
@@ -501,6 +542,8 @@ pub const Error = error{
     Unsupported,
     BackendUnavailable,
     KernelFailed,
+    /// A device buffer was already released, or comes from another device.
+    InvalidBuffer,
     DeviceFailed,
     OutOfMemory,
 };
@@ -625,23 +668,22 @@ pub fn openDeviceAt(backend: Backend, library: []const u8) Error!?Device {
 }
 
 fn openDeviceNamed(backend: Backend, explicit: ?[]const u8) Error!?Device {
-    const library = explicit orelse driverOverride(backend);
+    if (backend == .cpu) return Device{ .cpu = {} };
+    if (explicit) |name| return openDeviceVia(backend, name);
+    var buf: [max_candidates][]const u8 = undefined;
+    for (candidateList(backend, &buf)) |name| {
+        // A library that does not open, or opens without a device, is not an
+        // error — the next candidate gets its turn, and the CPU is the floor.
+        if (openDeviceVia(backend, name) catch null) |opened| return opened;
+    }
+    return null;
+}
+
+fn openDeviceVia(backend: Backend, library: []const u8) Error!?Device {
     return switch (backend) {
         .cpu => Device{ .cpu = {} },
-        .vulkan => blk: {
-            const opened = if (library) |name|
-                (vulkan.Device.openAt(name, null) catch |e| return mapDeviceError(e))
-            else
-                (vulkan.Device.open(null) catch |e| return mapDeviceError(e));
-            break :blk if (opened) |d| Device{ .vulkan = d } else null;
-        },
-        .webgpu => blk: {
-            const opened = if (library) |name|
-                (webgpu.Device.openAt(name) catch |e| return mapDeviceError(e))
-            else
-                (webgpu.Device.open() catch |e| return mapDeviceError(e));
-            break :blk if (opened) |d| Device{ .webgpu = d } else null;
-        },
+        .vulkan => if (vulkan.Device.openAt(library, null) catch |e| return mapDeviceError(e)) |d| Device{ .vulkan = d } else null,
+        .webgpu => if (webgpu.Device.openAt(library) catch |e| return mapDeviceError(e)) |d| Device{ .webgpu = d } else null,
         .metal, .d3d12 => null,
     };
 }
@@ -720,19 +762,25 @@ pub const entry_point = "main";
 
 fn dispatchVulkan(d: *vulkan.Device, kernel: Kernel, ctx: *KernelCtx) Error!void {
     const code = kernel.spirv orelse return Error.Unsupported;
-    const alloc = ctx.alloc;
-    const allocs = try alloc.alloc(vulkan.Device.Allocation, ctx.buffers.len);
-    defer alloc.free(allocs);
+    if (ctx.buffers.len > RunBuffers.max) return Error.Unsupported;
+
+    // Both arrays live on the stack: a dispatch to a warm device should not call
+    // an allocator, and it should get its buffers back from the device's pool
+    // rather than from the driver.
+    var local: [RunBuffers.max]vulkan.Device.Allocation = undefined;
+    const allocs = local[0..ctx.buffers.len];
     var created: usize = 0;
-    defer for (allocs[0..created]) |a| d.free(a);
+    defer for (allocs[0..created]) |a| d.release(a);
     for (ctx.buffers, 0..) |b, i| {
-        allocs[i] = d.allocBuffer(b.len) catch |e| return mapDeviceError(e);
+        allocs[i] = d.acquire(b.len) catch |e| return mapDeviceError(e);
         created += 1;
         d.upload(allocs[i], b.ptr[0..b.len]);
     }
-    const bindings = try alloc.alloc(vulkan.Device.BufferBinding, ctx.buffers.len);
-    defer alloc.free(bindings);
+
+    var stack: [RunBuffers.max]vulkan.Device.BufferBinding = undefined;
+    const bindings = stack[0..allocs.len];
     for (allocs, 0..) |a, i| bindings[i] = .{ .buffer = a.buffer, .size = a.size };
+
     d.dispatchCompute(code, bindings, ctx.count, ctx.threads) catch |e| return mapDeviceError(e);
     // Host-coherent memory: the device's writes are already visible.
     for (ctx.buffers, 0..) |b, i| d.download(allocs[i], b.ptr[0..b.len]);
@@ -745,9 +793,9 @@ fn dispatchWebgpu(d: *webgpu.Device, kernel: Kernel, ctx: *KernelCtx) Error!void
     const allocs = try alloc.alloc(webgpu.Device.Allocation, ctx.buffers.len);
     defer alloc.free(allocs);
     var created: usize = 0;
-    defer for (allocs[0..created]) |a| d.destroyBuffer(a);
+    defer for (allocs[0..created]) |a| d.release(a);
     for (ctx.buffers, 0..) |b, i| {
-        allocs[i] = d.createBuffer(b.len) catch |e| return mapDeviceError(e);
+        allocs[i] = d.acquire(b.len) catch |e| return mapDeviceError(e);
         created += 1;
         // Buffers are created mapped: write, then unmaps so the GPU may read.
         d.upload(allocs[i], b.ptr[0..b.len]);
@@ -765,6 +813,182 @@ fn mapDeviceError(e: anyerror) Error {
         else => Error.DeviceFailed,
     };
 }
+
+// ---------------------------------------------------------------------------
+// Device buffers: memory that stays on the device
+// ---------------------------------------------------------------------------
+
+/// A buffer that lives on the device between dispatches.
+///
+/// `dispatch` and `dispatchOn` copy every `KernelCtx.buffer` in, run, and copy it
+/// back. That is the right default for a library whose tensors live in host
+/// memory, and a waste in a loop. A `DeviceBuffer` is the other option:
+/// allocate once, write once, dispatch as often as you like, read back when you
+/// want the numbers.
+///
+/// ```zig
+/// var weights = try zb.createBuffer(&device, 4096, alloc);
+/// defer zb.destroyBuffer(&device, &weights);
+/// try zb.writeBuffer(&device, &weights, host_bytes);
+/// try zb.dispatchBuffers(&device, kernel, &.{&weights}, 1024, 64);
+/// try zb.readBuffer(&device, &weights, into_host);
+/// ```
+///
+/// The CPU device keeps the bytes in host memory, so the same code runs (and the
+/// same tests pass) on a machine with no GPU.
+pub const DeviceBuffer = struct {
+    backend: Backend,
+    size: usize,
+    /// Cleared by `destroyBuffer`; every other call refuses a dead buffer
+    /// instead of touching a handle the driver has already taken back.
+    live: bool = true,
+    memory: Memory,
+
+    const Memory = union(Backend) {
+        // Field order must match `Backend`'s; Zig checks it at comptime.
+        cpu: Cpu,
+        webgpu: webgpu.Device.Allocation,
+        metal: void,
+        vulkan: vulkan.Device.Allocation,
+        d3d12: void,
+
+        const Cpu = struct {
+            bytes: []u8,
+            alloc: std.mem.Allocator,
+        };
+    };
+
+    /// How many bytes the buffer holds.
+    pub fn len(self: *const DeviceBuffer) usize {
+        return self.size;
+    }
+};
+
+/// Allocates device memory that outlives a dispatch. `alloc` is used for the
+/// CPU's host memory and ignored by the GPU backends.
+pub fn createBuffer(dev: *Device, size: usize, alloc: std.mem.Allocator) Error!DeviceBuffer {
+    const wanted = @max(size, 4);
+    return switch (dev.*) {
+        .cpu => .{
+            .backend = .cpu,
+            .size = wanted,
+            .memory = .{ .cpu = .{
+                .bytes = try alloc.alloc(u8, wanted),
+                .alloc = alloc,
+            } },
+        },
+        .vulkan => |*d| blk: {
+            const allocation = d.acquire(wanted) catch |e| return mapDeviceError(e);
+            break :blk .{ .backend = .vulkan, .size = wanted, .memory = .{ .vulkan = allocation } };
+        },
+        .webgpu => |*d| blk: {
+            const allocation = d.acquire(wanted) catch |e| return mapDeviceError(e);
+            break :blk .{ .backend = .webgpu, .size = wanted, .memory = .{ .webgpu = allocation } };
+        },
+        .metal, .d3d12 => Error.BackendUnavailable,
+    };
+}
+
+/// Frees a buffer. Safe to call twice; the second call does nothing.
+///
+/// A buffer made by `createBuffer` on the GPU goes back into the device's pool,
+/// so the next `createBuffer` of a similar size does not ask the driver.
+pub fn destroyBuffer(dev: *Device, buf: *DeviceBuffer) void {
+    if (!buf.live) return;
+    switch (buf.memory) {
+        .cpu => |c| c.alloc.free(c.bytes),
+        .vulkan => |a| if (dev.* == .vulkan) dev.vulkan.release(a),
+        .webgpu => |a| if (dev.* == .webgpu) dev.webgpu.release(a),
+        .metal, .d3d12 => {},
+    }
+    buf.live = false;
+}
+
+/// Writes host bytes into a device buffer — what a one-shot dispatch does for
+/// the caller, made explicit so it can happen once instead of every time.
+pub fn writeBuffer(dev: *Device, buf: *DeviceBuffer, bytes: []const u8) Error!void {
+    if (!buf.live) return Error.InvalidBuffer;
+    const slice = bytes[0..@min(bytes.len, buf.size)];
+    switch (buf.memory) {
+        .cpu => |c| @memcpy(c.bytes[0..slice.len], slice),
+        .vulkan => |a| if (dev.* == .vulkan) dev.vulkan.upload(a, slice),
+        .webgpu => |a| if (dev.* == .webgpu) {
+            dev.webgpu.upload(a, slice);
+            dev.webgpu.commit(a);
+        },
+        .metal, .d3d12 => return Error.BackendUnavailable,
+    }
+}
+
+/// Reads a device buffer back into host memory.
+pub fn readBuffer(dev: *Device, buf: *const DeviceBuffer, out: []u8) Error!void {
+    if (!buf.live) return Error.InvalidBuffer;
+    const slice = out[0..@min(out.len, buf.size)];
+    switch (buf.memory) {
+        .cpu => |c| @memcpy(slice, c.bytes[0..slice.len]),
+        .vulkan => |a| if (dev.* == .vulkan) dev.vulkan.download(a, slice),
+        .webgpu => |a| if (dev.* == .webgpu) dev.webgpu.download(a, slice) catch |e| return mapDeviceError(e),
+        .metal, .d3d12 => return Error.BackendUnavailable,
+    }
+}
+
+/// Runs `kernel` on buffers that already live on the device: no upload, no
+/// download, no allocation, no descriptor setup the device has not already done.
+///
+/// The buffers must have been created on this device. The CPU device accepts up
+/// to `RunBuffers.max` of them and runs the kernel's Zig body.
+pub fn dispatchBuffers(
+    dev: *Device,
+    kernel: Kernel,
+    buffers: []const *const DeviceBuffer,
+    count: usize,
+    threads: u32,
+) Error!void {
+    for (buffers) |b| {
+        if (!b.live or b.backend != dev.backend()) return Error.InvalidBuffer;
+    }
+    switch (dev.*) {
+        .cpu => {
+            var host: [RunBuffers.max]Buffer = undefined;
+            if (buffers.len > host.len) return Error.Unsupported;
+            for (buffers, 0..) |b, i| host[i] = .{ .ptr = b.memory.cpu.bytes.ptr, .len = b.size };
+            var ctx = KernelCtx{
+                .buffers = host[0..buffers.len],
+                .count = count,
+                .threads = threads,
+                .alloc = std.heap.page_allocator,
+            };
+            return runCpu(kernel, &ctx);
+        },
+        .vulkan => |*d| {
+            const code = kernel.spirv orelse return Error.Unsupported;
+            // The binding descriptions live on the stack: a dispatch should not
+            // call an allocator at all.
+            var stack: [RunBuffers.max]vulkan.Device.BufferBinding = undefined;
+            if (buffers.len > stack.len) return Error.Unsupported;
+            for (buffers, 0..) |b, i| {
+                stack[i] = .{ .buffer = b.memory.vulkan.buffer, .size = b.memory.vulkan.size };
+            }
+            d.dispatchCompute(code, stack[0..buffers.len], count, threads) catch |e| return mapDeviceError(e);
+        },
+        .webgpu => |*d| {
+            const alloc = std.heap.page_allocator;
+            const wgsl = (try kernel.lower(.webgpu, alloc, threads)) orelse return Error.Unsupported;
+            defer alloc.free(wgsl);
+            const allocs = alloc.alloc(webgpu.Device.Allocation, buffers.len) catch return Error.OutOfMemory;
+            defer alloc.free(allocs);
+            for (buffers, 0..) |b, i| allocs[i] = b.memory.webgpu;
+            d.run(alloc, wgsl, entry_point, allocs, count, threads) catch |e| return mapDeviceError(e);
+        },
+        .metal, .d3d12 => return Error.BackendUnavailable,
+    }
+}
+
+/// The bound a device dispatch onto resident buffers has: sixteen buffers is far
+/// more than the kernel ABI needs, and it keeps the host-side array on the stack.
+pub const RunBuffers = struct {
+    pub const max = 16;
+};
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -991,5 +1215,118 @@ test "when a driver is installed the kernel really runs on the device" {
     for (data, 0..) |v, i| {
         const want = @as(f32, @floatFromInt(i)) * 2.0 + @as(f32, @floatFromInt(i));
         try testing.expectApproxEqAbs(want, v, 1e-3);
+    }
+}
+
+test "a named driver is tried first and environment candidates last" {
+    setDriverLibrary(.vulkan, "/tmp/zpu-test-vulkan.so");
+    addDriverLibrary(.vulkan, "/tmp/zpu-test-icd.so");
+    defer {
+        setDriverLibrary(.vulkan, null);
+        choices[@backingInt(Backend.vulkan)].extra_count = 0;
+    }
+
+    var buf: [max_candidates][]const u8 = undefined;
+    const list = candidateList(.vulkan, &buf);
+    try testing.expectEqualStrings("/tmp/zpu-test-vulkan.so", list[0]);
+    try testing.expectEqualStrings("/tmp/zpu-test-icd.so", list[list.len - 1]);
+    // The platform's own names stay in between: naming a driver must not turn
+    // the list into an all-or-nothing switch.
+    try testing.expect(list.len >= 3);
+
+    // With nothing named, every backend starts from its platform list.
+    var plain: [max_candidates][]const u8 = undefined;
+    const webgpu_list = candidateList(.webgpu, &plain);
+    try testing.expectEqualStrings(webgpu.libraryNames()[0], webgpu_list[0]);
+}
+
+test "device buffers hold a kernel's data between dispatches" {
+    const Scale = struct {
+        fn body(ctx: *KernelCtx) void {
+            const data = ctx.buffers[0].as(f32);
+            const scale = ctx.buffers[1].as(f32)[0];
+            data[ctx.id] = data[ctx.id] * scale + @as(f32, @floatFromInt(ctx.id));
+        }
+    };
+    const kernel = Kernel{
+        .name = "scale_offset",
+        .body = Scale.body,
+        .source = .{ .wgsl = spirv.scale_offset_wgsl, .glsl = spirv.scale_offset_glsl },
+        .spirv = &spirv.scale_offset,
+    };
+
+    // The CPU device keeps the bytes in host memory, so this checks the API
+    // itself; the test below runs the same kernel on a real device when there is
+    // one.
+    const dev = (try device(.cpu)).?;
+    var data = try createBuffer(dev, 256 * @sizeOf(f32), testing.allocator);
+    defer destroyBuffer(dev, &data);
+    var scale = try createBuffer(dev, @sizeOf(f32), testing.allocator);
+    defer destroyBuffer(dev, &scale);
+
+    var seed: [256]f32 = undefined;
+    for (&seed, 0..) |*v, i| v.* = @floatFromInt(i);
+    try writeBuffer(dev, &data, std.mem.sliceAsBytes(&seed));
+    const two = [1]f32{2.0};
+    try writeBuffer(dev, &scale, std.mem.sliceAsBytes(&two));
+
+    try dispatchBuffers(dev, kernel, &.{ &data, &scale }, seed.len, 8);
+
+    var out: [256]f32 = undefined;
+    try readBuffer(dev, &data, std.mem.sliceAsBytes(&out));
+    for (out, 0..) |v, i| {
+        const want = @as(f32, @floatFromInt(i)) * 2.0 + @as(f32, @floatFromInt(i));
+        try testing.expectApproxEqAbs(want, v, 1e-4);
+    }
+
+    // A released buffer is refused, not dereferenced.
+    destroyBuffer(dev, &data);
+    try testing.expectError(Error.InvalidBuffer, writeBuffer(dev, &data, &.{ 0, 0, 0, 0 }));
+    try testing.expectError(Error.InvalidBuffer, readBuffer(dev, &data, std.mem.sliceAsBytes(&out)));
+    // ...and destroying it twice is harmless.
+    destroyBuffer(dev, &data);
+}
+
+test "resident buffers keep their data on a real device" {
+    if (!probe().has(.vulkan)) return;
+    const dev = (try device(.vulkan)) orelse return error.DeviceRefused;
+    defer shutdownDevices();
+
+    const Scale = struct {
+        fn body(ctx: *KernelCtx) void {
+            const data = ctx.buffers[0].as(f32);
+            const scale = ctx.buffers[1].as(f32)[0];
+            data[ctx.id] = data[ctx.id] * scale + @as(f32, @floatFromInt(ctx.id));
+        }
+    };
+    const kernel = Kernel{
+        .name = "scale_offset",
+        .body = Scale.body,
+        .source = .{ .wgsl = spirv.scale_offset_wgsl, .glsl = spirv.scale_offset_glsl },
+        .spirv = &spirv.scale_offset,
+    };
+
+    var data = try createBuffer(dev, 256 * @sizeOf(f32), testing.allocator);
+    defer destroyBuffer(dev, &data);
+    var scale = try createBuffer(dev, @sizeOf(f32), testing.allocator);
+    defer destroyBuffer(dev, &scale);
+
+    var seed: [256]f32 = undefined;
+    for (&seed, 0..) |*v, i| v.* = @floatFromInt(i);
+    try writeBuffer(dev, &data, std.mem.sliceAsBytes(&seed));
+    const two = [1]f32{2.0};
+    try writeBuffer(dev, &scale, std.mem.sliceAsBytes(&two));
+
+    // Twice on the same resident data: the second pass has to build on the
+    // first, and it reuses the pipeline the first one compiled.
+    try dispatchBuffers(dev, kernel, &.{ &data, &scale }, seed.len, 64);
+    try dispatchBuffers(dev, kernel, &.{ &data, &scale }, seed.len, 64);
+
+    var out: [256]f32 = undefined;
+    try readBuffer(dev, &data, std.mem.sliceAsBytes(&out));
+    for (out, 0..) |v, i| {
+        const index = @as(f32, @floatFromInt(i));
+        const want = (index * 2.0 + index) * 2.0 + index;
+        try testing.expectApproxEqAbs(want, v, 1e-2);
     }
 }

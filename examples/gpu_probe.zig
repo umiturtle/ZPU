@@ -168,25 +168,75 @@ pub fn main(init: std.process.Init) !void {
         all_ok = all_ok and good;
         try out.print("  {s:<8} ran {d} invocations: {s} (data[3] = {d})\n", .{ b.name(), n, if (good) "correct" else "WRONG", data[3] });
     }
-    // What one dispatch costs once the device is warm: the number covers the
-    // whole round trip (write the buffers, run the kernel, read them back), and
-    // the first dispatch is reported apart because it pays for the pipeline.
+    // The same kernel with data that stays on the device: allocate once, write
+    // once, dispatch as often as you like. This is the shape a hot loop wants —
+    // no upload, no download, no allocation, no pipeline compile per call.
+    if (gpu_ran) |backend| {
+        const dev = (try zb.device(backend)) orelse {
+            try out.print("\n{s}: no cached device to hold buffers\n", .{backend.name()});
+            try out.flush();
+            return error.DeviceRefused;
+        };
+        var resident = try zb.createBuffer(dev, @sizeOf(f32) * n, alloc);
+        defer zb.destroyBuffer(dev, &resident);
+        var factor = try zb.createBuffer(dev, @sizeOf(f32), alloc);
+        defer zb.destroyBuffer(dev, &factor);
+
+        for (data, 0..) |*v, i| v.* = @floatFromInt(i);
+        try zb.writeBuffer(dev, &resident, std.mem.sliceAsBytes(data[0..]));
+        const two = [1]f32{2.0};
+        try zb.writeBuffer(dev, &factor, std.mem.sliceAsBytes(&two));
+
+        const rounds: usize = 200;
+        const first_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+        try zb.dispatchBuffers(dev, Scale.kernel, &.{ &resident, &factor }, n, 64);
+        const first_ns = std.Io.Clock.awake.now(init.io).nanoseconds - first_start;
+        const started = std.Io.Clock.awake.now(init.io).nanoseconds;
+        var round: usize = 1;
+        while (round < rounds) : (round += 1) {
+            try zb.dispatchBuffers(dev, Scale.kernel, &.{ &resident, &factor }, n, 64);
+        }
+        const elapsed = std.Io.Clock.awake.now(init.io).nanoseconds - started;
+        const per_dispatch_us = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(rounds - 1)) / 1000.0;
+
+        // The timing loop ran the kernel 200 times, so the numbers there are
+        // meaningless by now; put the seed back and check two known passes:
+        // (i * 2 + i) * 2 + i.
+        try zb.writeBuffer(dev, &resident, std.mem.sliceAsBytes(data[0..]));
+        try zb.dispatchBuffers(dev, Scale.kernel, &.{ &resident, &factor }, n, 64);
+        try zb.dispatchBuffers(dev, Scale.kernel, &.{ &resident, &factor }, n, 64);
+        var check: [1024]f32 = undefined;
+        try zb.readBuffer(dev, &resident, std.mem.sliceAsBytes(check[0..n]));
+        var good = true;
+        for (check[0..n], 0..) |v, i| {
+            const index = @as(f32, @floatFromInt(i));
+            const want = (index * 2.0 + index) * 2.0 + index;
+            if (@abs(v - want) > 1e-2) good = false;
+        }
+        all_ok = all_ok and good;
+        try out.print("\n{s}: resident buffers — first dispatch {d} us (shader compiled), then {d:.1} us each over {d} ({s})\n", .{
+            backend.name(),
+            @divTrunc(first_ns, std.time.ns_per_us),
+            per_dispatch_us,
+            rounds - 1,
+            if (good) "correct" else "WRONG",
+        });
+    }
+
+    // The same kernel the way a caller with host-memory tensors uses it: every
+    // dispatch copies the buffers in and out. The device still reuses its
+    // pipeline and pooled buffers, so this is the fair comparison with the
+    // resident path above.
     if (gpu_ran) |backend| {
         const rounds: usize = 200;
         var timing = zb.KernelCtx{ .buffers = &buffers, .count = n, .threads = 64, .alloc = alloc };
-        const warm_start = std.Io.Clock.awake.now(init.io).nanoseconds;
-        try zb.dispatch(backend, Scale.kernel, &timing);
-        const warm_ns = std.Io.Clock.awake.now(init.io).nanoseconds - warm_start;
         const loop_start = std.Io.Clock.awake.now(init.io).nanoseconds;
-        var round: usize = 1;
+        var round: usize = 0;
         while (round < rounds) : (round += 1) try zb.dispatch(backend, Scale.kernel, &timing);
         const loop_ns = std.Io.Clock.awake.now(init.io).nanoseconds - loop_start;
-        const per_dispatch_us = @as(f64, @floatFromInt(loop_ns)) / @as(f64, @floatFromInt(rounds - 1)) / 1000.0;
-        try out.print("\n{s}: first dispatch {d} us (pipeline included), then {d:.1} us each over {d} more\n", .{
-            backend.name(),
-            @divTrunc(warm_ns, std.time.ns_per_us),
-            per_dispatch_us,
-            rounds - 1,
+        const per_dispatch_us = @as(f64, @floatFromInt(loop_ns)) / @as(f64, @floatFromInt(rounds)) / 1000.0;
+        try out.print("{s}: host buffers copied in and out — {d:.1} us per dispatch over {d}\n", .{
+            backend.name(), per_dispatch_us, rounds,
         });
     }
 

@@ -636,6 +636,11 @@ pub const Device = struct {
     /// One command buffer and one fence, reset instead of reallocated.
     cmd: VkCommandBuffer = undefined,
     fence: VkFence = undefined,
+    /// Buffers handed back after a dispatch, kept for the next one of a
+    /// compatible size. A loop that dispatches many times stops paying the
+    /// driver's allocator (and the kernel stops paying for it) even when the
+    /// caller keeps its data in host memory.
+    pool: [max_pool]?Allocation = @splat(null),
 
     // device level entry points
     destroy_device: *const fn (VkDevice, ?*const anyopaque) callconv(VKAPI) void,
@@ -860,6 +865,10 @@ pub const Device = struct {
         for (&self.pipelines) |*slot| {
             if (slot.*) |*p| self.destroyCached(p);
         }
+        for (&self.pool) |*slot| {
+            if (slot.*) |a| self.free(a);
+            slot.* = null;
+        }
         self.destroy_fence(self.handle, self.fence, null);
         self.free_command_buffers(self.handle, self.command_pool, 1, @ptrCast(&self.cmd));
         self.destroy_command_pool(self.handle, self.command_pool, null);
@@ -912,6 +921,34 @@ pub const Device = struct {
             .data = ptr[0..size],
             .size = req.size,
         };
+    }
+
+    /// The most freed buffers a device holds on to.
+    pub const max_pool = 8;
+
+    /// A buffer of at least `size` bytes: one from the pool when there is one
+    /// that fits, otherwise a fresh allocation.
+    pub fn acquire(self: *Device, size: usize) Error!Allocation {
+        for (&self.pool) |*slot| {
+            if (slot.*) |cached| {
+                if (cached.data.len >= size) {
+                    slot.* = null;
+                    return cached;
+                }
+            }
+        }
+        return self.allocBuffer(size);
+    }
+
+    /// Hands a buffer back to the pool; frees it when the pool is full.
+    pub fn release(self: *Device, alloc: Allocation) void {
+        for (&self.pool) |*slot| {
+            if (slot.* == null) {
+                slot.* = alloc;
+                return;
+            }
+        }
+        self.free(alloc);
     }
 
     pub fn free(self: *Device, alloc: Allocation) void {
