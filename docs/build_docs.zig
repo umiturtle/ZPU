@@ -21,6 +21,93 @@ const Allocator = std.mem.Allocator;
 
 const out_root = "zig-out/doc";
 
+/// The site is written twice: Japanese at the root, English under `en/`, with a
+/// switcher between them. Both are generated from Markdown sources that live
+/// side by side (`docs/…` and `docs/en/…`), so the two versions are always the
+/// same shape.
+const Lang = enum { ja, en };
+
+const Spec = struct {
+    lang: Lang,
+    /// directory prefix inside the output, "" for Japanese, "en/" for English
+    out_prefix: []const u8,
+    /// where the Markdown lives
+    doc_dir: []const u8,
+    /// Japanese pages that are working documents: MILESTONES.md and README.md
+    include_repo_docs: bool,
+
+    // labels
+    toc: []const u8,
+    declarations: []const u8,
+    declarations_hint: []const u8,
+    source_line: []const u8,
+    group_intro: []const u8,
+    group_features: []const u8,
+    title_index: []const u8,
+    title_guide: []const u8,
+    title_comparison: []const u8,
+    title_milestones: []const u8,
+    title_readme: []const u8,
+    switcher_here: []const u8,
+    switcher_other: []const u8,
+};
+
+fn specFor(lang: Lang) Spec {
+    return switch (lang) {
+        .ja => .{
+            .lang = .ja,
+            .out_prefix = "",
+            .doc_dir = "docs",
+            .include_repo_docs = true,
+            .toc = "目次",
+            .declarations = "宣言",
+            .declarations_hint = "ソース内の <code>///</code> コメントから生成。",
+            .source_line = "元ファイル: ",
+            .group_intro = "はじめに",
+            .group_features = "機能",
+            .title_index = "ZPU",
+            .title_guide = "ガイド",
+            .title_comparison = "他ライブラリとの違い",
+            .title_milestones = "マイルストーン",
+            .title_readme = "README",
+            .switcher_here = "日本語",
+            .switcher_other = "English",
+        },
+        .en => .{
+            .lang = .en,
+            .out_prefix = "en/",
+            .doc_dir = "docs/en",
+            .include_repo_docs = false,
+            .toc = "Contents",
+            .declarations = "Declarations",
+            .declarations_hint = "Generated from the <code>///</code> comments in the source.",
+            .source_line = "Source: ",
+            .group_intro = "Getting started",
+            .group_features = "Features",
+            .title_index = "ZPU",
+            .title_guide = "Guide",
+            .title_comparison = "How it differs",
+            .title_milestones = "Milestones",
+            .title_readme = "README",
+            .switcher_here = "English",
+            .switcher_other = "日本語",
+        },
+    };
+}
+
+/// Everything the renderer needs to know about the page it is writing: the
+/// arena, the language, and how to walk back up to the documentation root (so
+/// `*.md` links resolve from any subdirectory).
+const Ctx = struct {
+    arena: Allocator,
+    spec: Spec,
+    up: []const u8,
+
+    fn prefixed(ctx: Ctx, name: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ ctx.up, name });
+    }
+};
+
 /// One navigation entry.
 const Page = struct {
     /// file name inside the output directory, e.g. "features/ops.html"
@@ -40,7 +127,31 @@ const areas = [_][]const u8{ "features", "api" };
 const Site = struct {
     io: Io,
     alloc: Allocator,
+    spec: Spec,
     pages: std.ArrayListUnmanaged(Page) = .empty,
+
+    /// Page names are stored relative to `out_root`, so the English site is
+    /// simply the same names with an `en/` prefix.
+    fn addPage(self: *Site, out_rel: []const u8, title: []const u8, src_name: []const u8, group: []const u8) !void {
+        return self.add(.{
+            .out_name = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{ self.spec.out_prefix, out_rel }),
+            .title = title,
+            .src_name = src_name,
+            .group = group,
+        });
+    }
+
+    /// The same page in the other language, when that page exists.
+    fn counterpart(self: *Site, other: *Site, out_name: []const u8) ?[]const u8 {
+        var alt: []const u8 = undefined;
+        if (self.spec.lang == .ja) {
+            alt = std.fmt.allocPrint(other.alloc, "{s}{s}", .{ other.spec.out_prefix, out_name }) catch return null;
+        } else {
+            if (!std.mem.startsWith(u8, out_name, self.spec.out_prefix)) return null;
+            alt = out_name[self.spec.out_prefix.len..];
+        }
+        return if (other.pageByOut(alt) != null) alt else null;
+    }
 
     fn add(self: *Site, page: Page) !void {
         try self.pages.append(self.alloc, page);
@@ -59,30 +170,56 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
 
     const cwd = Io.Dir.cwd();
-    try cwd.createDirPath(io, out_root);
-    try cwd.createDirPath(io, out_root ++ "/features");
-    try cwd.createDirPath(io, out_root ++ "/api");
+    for ([_]Spec{ specFor(.ja), specFor(.en) }) |spec| {
+        try cwd.createDirPath(io, try mk(arena, "{s}/{s}features", .{ out_root, spec.out_prefix }));
+        try cwd.createDirPath(io, try mk(arena, "{s}/{s}api", .{ out_root, spec.out_prefix }));
+    }
 
-    var site = Site{ .io = io, .alloc = arena };
+    // Both languages are collected first: the header of every page links to the
+    // same page in the other language, which is only known once both page lists
+    // exist.
+    var sites = [2]Site{
+        .{ .io = io, .alloc = arena, .spec = specFor(.ja) },
+        .{ .io = io, .alloc = arena, .spec = specFor(.en) },
+    };
+    for (&sites) |*site| try collectPages(io, arena, site);
+    for (&sites, 0..) |*site, i| try renderSite(io, arena, site, &sites[1 - i]);
+}
 
-    // ---- hand written pages -------------------------------------------------
-    try site.add(.{ .out_name = "index.html", .title = "ZPU", .src_name = "docs/index.md", .group = "" });
-    try site.add(.{ .out_name = "guide.html", .title = "ガイド", .src_name = "docs/guide.md", .group = "はじめに" });
-    try site.add(.{ .out_name = "comparison.html", .title = "他ライブラリとの違い", .src_name = "docs/comparison.md", .group = "はじめに" });
-    try site.add(.{ .out_name = "milestones.html", .title = "マイルストーン", .src_name = "MILESTONES.md", .group = "はじめに" });
-    try site.add(.{ .out_name = "readme.html", .title = "README", .src_name = "README.md", .group = "はじめに" });
+fn mk(arena: Allocator, comptime fmt: []const u8, args: anytype) ![]const u8 {
+    return std.fmt.allocPrint(arena, fmt, args);
+}
 
-    // `docs/features/NN-name.md` in name order
-    const feature_names = try listMarkdown(io, arena, "docs/features");
+/// Fills `site` with the page list for its language.
+fn collectPages(io: Io, arena: Allocator, site: *Site) !void {
+    const spec = site.spec;
+    const doc = spec.doc_dir;
+
+    try site.addPage("index.html", spec.title_index, try mk(arena, "{s}/index.md", .{doc}), "");
+    try site.addPage("guide.html", spec.title_guide, try mk(arena, "{s}/guide.md", .{doc}), spec.group_intro);
+    try site.addPage("comparison.html", spec.title_comparison, try mk(arena, "{s}/comparison.md", .{doc}), spec.group_intro);
+    if (spec.include_repo_docs) {
+        try site.addPage("milestones.html", spec.title_milestones, "MILESTONES.md", spec.group_intro);
+        try site.addPage("readme.html", spec.title_readme, "README.md", spec.group_intro);
+    }
+
+    // `<doc>/features/NN-name.md` in name order: the numeric prefix is the order
+    // of the tour, and both languages use the same names.
+    const features_dir = try mk(arena, "{s}/features", .{doc});
+    const feature_names = try listMarkdown(io, arena, features_dir);
     std.mem.sort([]const u8, feature_names, {}, lessThanName);
     for (feature_names) |name| {
-        const out_name = try std.fmt.allocPrint(arena, "features/{s}.html", .{stripMd(name)});
-        const title = try humanTitle(arena, name);
-        const src = try std.fmt.allocPrint(arena, "docs/features/{s}", .{name});
-        try site.add(.{ .out_name = out_name, .title = title, .src_name = src, .group = "機能" });
+        try site.addPage(
+            try mk(arena, "features/{s}.html", .{stripMd(name)}),
+            try humanTitle(arena, name),
+            try mk(arena, "{s}/{s}", .{ features_dir, name }),
+            spec.group_features,
+        );
     }
 
     // ---- API pages from the sources ----------------------------------------
+    // The doc comments are written in English, so the same page serves both
+    // languages; it is listed in each site's navigation.
     var source_names: std.ArrayListUnmanaged([]const u8) = .empty;
     try source_names.append(arena, "src/zpu.zig");
     try source_names.append(arena, "src/zgf.zig");
@@ -90,47 +227,54 @@ pub fn main(init: std.process.Init) !void {
     const mod_names = try listZig(io, arena, "src/zpu");
     std.mem.sort([]const u8, mod_names, {}, lessThanName);
     for (mod_names) |name| {
-        try source_names.append(arena, try std.fmt.allocPrint(arena, "src/zpu/{s}", .{name}));
+        try source_names.append(arena, try mk(arena, "src/zpu/{s}", .{name}));
     }
     for (source_names.items) |src| {
         const base = std.fs.path.basename(src);
-        const out_name = try std.fmt.allocPrint(arena, "api/{s}.html", .{stripZig(base)});
-        const title = try std.fmt.allocPrint(arena, "{s}", .{stripZig(base)});
-        try site.add(.{ .out_name = out_name, .title = title, .src_name = src, .group = "API" });
+        try site.addPage(
+            try mk(arena, "api/{s}.html", .{stripZig(base)}),
+            stripZig(base),
+            src,
+            "API",
+        );
     }
+}
 
-    // ---- render ------------------------------------------------------------
+/// Renders every page of `site` and writes it to disk. `other` is the site of
+/// the other language, used for the language switcher.
+fn renderSite(io: Io, arena: Allocator, site: *Site, other: *Site) !void {
+    const cwd = Io.Dir.cwd();
     for (site.pages.items) |*page| {
+        const ctx = Ctx{
+            .arena = arena,
+            .spec = site.spec,
+            .up = try depthPrefix(arena, page.out_name),
+        };
         const text = readWhole(io, arena, page.src_name) catch |err| {
             std.debug.print("doc: cannot read {s}: {s}\n", .{ page.src_name, @errorName(err) });
-            page.body = try std.fmt.allocPrint(arena, "<p class=\"missing\">{s} が読めません ({s})</p>\n", .{ page.src_name, @errorName(err) });
+            page.body = try mk(arena, "<p class=\"missing\">{s} が読めません ({s})</p>\n", .{ page.src_name, @errorName(err) });
             continue;
         };
         var buf = Io.Writer.Allocating.init(arena);
-        if (std.mem.startsWith(u8, page.out_name, "api/")) {
-            try renderZigApi(&buf.writer, arena, text);
+        if (std.mem.indexOf(u8, page.out_name, "api/") != null) {
+            try renderZigApi(&buf.writer, ctx, text);
         } else {
-            try renderMarkdown(&buf.writer, arena, text, !std.mem.eql(u8, page.out_name, "index.html"));
+            const is_index = std.mem.endsWith(u8, page.out_name, "index.html");
+            try renderMarkdown(&buf.writer, ctx, text, !is_index);
         }
         page.body = buf.written();
     }
 
-    for (site.pages.items) |page| {
-        const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ out_root, page.out_name });
+    for (site.pages.items) |*page| {
+        const path = try mk(arena, "{s}/{s}", .{ out_root, page.out_name });
         const file = try cwd.createFile(io, path, .{});
         defer file.close(io);
         var html = Io.Writer.Allocating.init(arena);
-        try writeSkeleton(&html.writer, arena, &site, &page);
+        try writeSkeleton(&html.writer, arena, site, other, page);
         try file.writeStreamingAll(io, html.written());
         std.debug.print("doc: {s}\n", .{path});
     }
-
-    const css = try std.fmt.allocPrint(arena, "{s}/style.css", .{out_root});
-    const css_file = try cwd.createFile(io, css, .{});
-    defer css_file.close(io);
-    try css_file.writeStreamingAll(io, style_css);
-    std.debug.print("doc: {s}\n", .{css});
-    std.debug.print("doc: {d} pages\n", .{site.pages.items.len});
+    std.debug.print("doc: {d} {s} pages\n", .{ site.pages.items.len, @tagName(site.spec.lang) });
 }
 
 // ---------------------------------------------------------------- file helpers
@@ -204,7 +348,8 @@ fn readWhole(io: Io, arena: Allocator, path: []const u8) ![]const u8 {
 // ------------------------------------------------------------------ markdown
 
 /// Renders the Markdown subset described in the file comment.
-fn renderMarkdown(w: *Io.Writer, arena: Allocator, text: []const u8, skip_first_heading: bool) !void {
+fn renderMarkdown(w: *Io.Writer, ctx: Ctx, text: []const u8, skip_first_heading: bool) !void {
+    const arena = ctx.arena;
     var lines = std.mem.splitScalar(u8, text, '\n');
 
     // first pass: table of contents from the headings
@@ -226,7 +371,7 @@ fn renderMarkdown(w: *Io.Writer, arena: Allocator, text: []const u8, skip_first_
         }
     }
     if (toc.items.len > 1) {
-        try w.writeAll("<nav class=\"toc\"><strong>目次</strong><ul>");
+        try w.print("<nav class=\"toc\"><strong>{s}</strong><ul>", .{ctx.spec.toc});
         for (toc.items) |e| {
             try w.print("<li class=\"l{d}\"><a href=\"#{s}\">{s}</a></li>", .{ e.level, e.anchor, e.title });
         }
@@ -247,10 +392,10 @@ fn renderMarkdown(w: *Io.Writer, arena: Allocator, text: []const u8, skip_first_
     while (lines.next()) |raw| {
         const line = std.mem.trimEnd(u8, raw, "\r");
         if (std.mem.startsWith(u8, line, "```")) {
-            try flushParagraph(w, arena, &paragraph, &in_paragraph);
+            try flushParagraph(w, ctx, &paragraph, &in_paragraph);
             try flushList(w, &list_kind);
             if (!in_code) {
-                try flushTable(w, arena, &table_rows);
+                try flushTable(w, ctx, &table_rows);
                 in_code = true;
                 if (line.len > 3) try w.print("<pre data-lang=\"{s}\">", .{std.mem.trim(u8, line[3..], " ")});
                 try w.writeAll("<code>");
@@ -266,15 +411,15 @@ fn renderMarkdown(w: *Io.Writer, arena: Allocator, text: []const u8, skip_first_
             continue;
         }
         if (line.len == 0) {
-            try flushParagraph(w, arena, &paragraph, &in_paragraph);
+            try flushParagraph(w, ctx, &paragraph, &in_paragraph);
             try flushList(w, &list_kind);
-            try flushTable(w, arena, &table_rows);
+            try flushTable(w, ctx, &table_rows);
             continue;
         }
         if (headingLevel(line)) |level| {
-            try flushParagraph(w, arena, &paragraph, &in_paragraph);
+            try flushParagraph(w, ctx, &paragraph, &in_paragraph);
             try flushList(w, &list_kind);
-            try flushTable(w, arena, &table_rows);
+            try flushTable(w, ctx, &table_rows);
             if (level == 1 and !title_seen) {
                 // the page frame already printed this as <h1>
                 title_seen = true;
@@ -289,33 +434,33 @@ fn renderMarkdown(w: *Io.Writer, arena: Allocator, text: []const u8, skip_first_
             try w.print("<h{d} id=\"", .{lvl});
             try w.writeAll(try anchorFor(arena, heading_index));
             try w.writeAll("\">");
-            try renderInline(w, arena, title);
+            try renderInline(w, ctx, title);
             try w.print("</h{d}>\n", .{lvl});
             heading_index += 1;
             continue;
         }
         if (isTableRow(line)) {
-            try flushParagraph(w, arena, &paragraph, &in_paragraph);
+            try flushParagraph(w, ctx, &paragraph, &in_paragraph);
             try flushList(w, &list_kind);
             try table_rows.append(arena, line);
             continue;
         }
         if (isBullet(line)) {
-            try flushParagraph(w, arena, &paragraph, &in_paragraph);
-            try flushTable(w, arena, &table_rows);
+            try flushParagraph(w, ctx, &paragraph, &in_paragraph);
+            try flushTable(w, ctx, &table_rows);
             if (list_kind != .bullets) {
                 try flushList(w, &list_kind);
                 try w.writeAll("<ul>");
                 list_kind = .bullets;
             }
             try w.writeAll("<li>");
-            try renderInline(w, arena, std.mem.trim(u8, line[2..], " "));
+            try renderInline(w, ctx, std.mem.trim(u8, line[2..], " "));
             try w.writeAll("</li>\n");
             continue;
         }
         if (isNumbered(line)) {
-            try flushParagraph(w, arena, &paragraph, &in_paragraph);
-            try flushTable(w, arena, &table_rows);
+            try flushParagraph(w, ctx, &paragraph, &in_paragraph);
+            try flushTable(w, ctx, &table_rows);
             if (list_kind != .numbers) {
                 try flushList(w, &list_kind);
                 try w.writeAll("<ol>");
@@ -323,19 +468,19 @@ fn renderMarkdown(w: *Io.Writer, arena: Allocator, text: []const u8, skip_first_
             }
             const rest = std.mem.trimStart(u8, line, "0123456789. ");
             try w.writeAll("<li>");
-            try renderInline(w, arena, rest);
+            try renderInline(w, ctx, rest);
             try w.writeAll("</li>\n");
             continue;
         }
         try flushList(w, &list_kind);
-        try flushTable(w, arena, &table_rows);
+        try flushTable(w, ctx, &table_rows);
         if (in_paragraph) try paragraph.append(arena, ' ');
         try paragraph.appendSlice(arena, std.mem.trim(u8, line, " "));
         in_paragraph = true;
     }
-    try flushParagraph(w, arena, &paragraph, &in_paragraph);
+    try flushParagraph(w, ctx, &paragraph, &in_paragraph);
     try flushList(w, &list_kind);
-    try flushTable(w, arena, &table_rows);
+    try flushTable(w, ctx, &table_rows);
 }
 
 const TocEntry = struct { level: usize, title: []const u8, anchor: []const u8 };
@@ -377,10 +522,10 @@ fn isTableSeparator(line: []const u8) bool {
     return std.mem.indexOfScalar(u8, line, '-') != null;
 }
 
-fn flushParagraph(w: *Io.Writer, arena: Allocator, paragraph: *std.ArrayListUnmanaged(u8), open: *bool) !void {
+fn flushParagraph(w: *Io.Writer, ctx: Ctx, paragraph: *std.ArrayListUnmanaged(u8), open: *bool) !void {
     if (!open.*) return;
     try w.writeAll("<p>");
-    try renderInline(w, arena, paragraph.items);
+    try renderInline(w, ctx, paragraph.items);
     try w.writeAll("</p>\n");
     paragraph.clearRetainingCapacity();
     open.* = false;
@@ -397,7 +542,7 @@ fn flushList(w: *Io.Writer, kind: *ListKind) !void {
     kind.* = .none;
 }
 
-fn flushTable(w: *Io.Writer, arena: Allocator, rows: *std.ArrayListUnmanaged([]const u8)) !void {
+fn flushTable(w: *Io.Writer, ctx: Ctx, rows: *std.ArrayListUnmanaged([]const u8)) !void {
     if (rows.items.len == 0) return;
     try w.writeAll("<table>\n");
     var first = true;
@@ -410,7 +555,7 @@ fn flushTable(w: *Io.Writer, arena: Allocator, rows: *std.ArrayListUnmanaged([]c
         var cells = std.mem.splitScalar(u8, std.mem.trim(u8, row, "|"), '|');
         while (cells.next()) |cell| {
             try w.print("<{s}>", .{tag});
-            try renderInline(w, arena, std.mem.trim(u8, cell, " "));
+            try renderInline(w, ctx, std.mem.trim(u8, cell, " "));
             try w.print("</{s}>", .{tag});
         }
         try w.writeAll("</tr>\n");
@@ -421,7 +566,7 @@ fn flushTable(w: *Io.Writer, arena: Allocator, rows: *std.ArrayListUnmanaged([]c
 }
 
 /// Handles `` `code` ``, `**bold**`, `*italic*` and `[text](target)`.
-fn renderInline(w: *Io.Writer, arena: Allocator, text: []const u8) !void {
+fn renderInline(w: *Io.Writer, ctx: Ctx, text: []const u8) !void {
     var i: usize = 0;
     var plain_start: usize = 0;
     while (i < text.len) {
@@ -440,7 +585,7 @@ fn renderInline(w: *Io.Writer, arena: Allocator, text: []const u8) !void {
             if (std.mem.indexOfPos(u8, text, i + 2, "**")) |end| {
                 try escapeHtml(w, text[plain_start..i]);
                 try w.writeAll("<strong>");
-                try renderInline(w, arena, text[i + 2 .. end]);
+                try renderInline(w, ctx, text[i + 2 .. end]);
                 try w.writeAll("</strong>");
                 i = end + 2;
                 plain_start = i;
@@ -452,9 +597,9 @@ fn renderInline(w: *Io.Writer, arena: Allocator, text: []const u8) !void {
                 if (mid + 1 < text.len and text[mid + 1] == '(') {
                     if (std.mem.indexOfScalarPos(u8, text, mid + 1, ')')) |end| {
                         try escapeHtml(w, text[plain_start..i]);
-                        const target = try rewriteTarget(arena, text[mid + 2 .. end]);
+                        const target = try rewriteTarget(ctx, text[mid + 2 .. end]);
                         try w.print("<a href=\"{s}\">", .{target});
-                        try renderInline(w, arena, text[i + 1 .. mid]);
+                        try renderInline(w, ctx, text[i + 1 .. mid]);
                         try w.writeAll("</a>");
                         i = end + 1;
                         plain_start = i;
@@ -471,7 +616,8 @@ fn renderInline(w: *Io.Writer, arena: Allocator, text: []const u8) !void {
 const repo_prefix = "https://github.com/umiturtle/ZPU/blob/main/";
 
 /// Rewrites `*.md` links to the generated HTML page and links to source files.
-fn rewriteTarget(arena: Allocator, target: []const u8) ![]const u8 {
+fn rewriteTarget(ctx: Ctx, target: []const u8) ![]const u8 {
+    const arena = ctx.arena;
     if (std.mem.startsWith(u8, target, "http://") or std.mem.startsWith(u8, target, "https://") or
         std.mem.startsWith(u8, target, "#"))
     {
@@ -479,16 +625,24 @@ fn rewriteTarget(arena: Allocator, target: []const u8) ![]const u8 {
     }
     if (std.mem.endsWith(u8, target, ".md")) {
         const base = std.fs.path.basename(stripMd(target));
-        if (std.mem.eql(u8, base, "index")) return "index.html";
-        if (std.mem.eql(u8, base, "guide")) return "guide.html";
-        if (std.mem.eql(u8, base, "comparison")) return "comparison.html";
-        if (std.mem.eql(u8, base, "MILESTONES") or std.mem.eql(u8, base, "milestones")) return "milestones.html";
-        if (std.mem.eql(u8, base, "README") or std.mem.eql(u8, base, "readme")) return "readme.html";
-        if (std.mem.startsWith(u8, target, "docs/features/")) {
-            return std.fmt.allocPrint(arena, "features/{s}.html", .{base});
-        }
-        return std.fmt.allocPrint(arena, "{s}.html", .{base});
+        const here = ctx.spec.lang;
+        // A link to a page of the *other* language keeps pointing there, so the
+        // two trees can be read side by side.
+        const other_lang = std.mem.startsWith(u8, target, "docs/en/");
+        if (std.mem.eql(u8, base, "index")) return ctx.prefixed(if (other_lang and here == .ja) "en/index.html" else "index.html");
+        if (std.mem.eql(u8, base, "guide")) return ctx.prefixed(if (other_lang and here == .ja) "en/guide.html" else "guide.html");
+        if (std.mem.eql(u8, base, "comparison")) return ctx.prefixed(if (other_lang and here == .ja) "en/comparison.html" else "comparison.html");
+        if (std.mem.eql(u8, base, "MILESTONES") or std.mem.eql(u8, base, "milestones")) return ctx.prefixed("milestones.html");
+        if (std.mem.eql(u8, base, "README") or std.mem.eql(u8, base, "readme")) return ctx.prefixed("readme.html");
+        return ctx.prefixed(try std.fmt.allocPrint(arena, "{s}.html", .{base}));
     }
+    if (std.mem.startsWith(u8, target, "..")) {
+        // an explicit relative hop out of the page's directory
+        return ctx.prefixed(target[3..]);
+    }
+    // a link that already points at a generated page (`03-transforms.html`):
+    // it is relative to the file it was written in, so it is left alone
+    if (std.mem.endsWith(u8, target, ".html")) return target;
     // a source file or any other repository path: link to the file on GitHub
     return std.fmt.allocPrint(arena, "{s}{s}", .{ repo_prefix, target });
 }
@@ -509,7 +663,8 @@ fn escapeHtml(w: *Io.Writer, text: []const u8) !void {
 
 /// Turns a Zig source file into an API page: the `//!` module doc, then every
 /// `///` block immediately in front of a `pub` declaration.
-fn renderZigApi(w: *Io.Writer, arena: Allocator, text: []const u8) !void {
+fn renderZigApi(w: *Io.Writer, ctx: Ctx, text: []const u8) !void {
+    const arena = ctx.arena;
     var lines = std.mem.splitScalar(u8, text, '\n');
     var module_doc: std.ArrayListUnmanaged(u8) = .empty;
 
@@ -528,11 +683,11 @@ fn renderZigApi(w: *Io.Writer, arena: Allocator, text: []const u8) !void {
     }
     if (module_doc.items.len != 0) {
         try w.writeAll("<section class=\"module-doc\">");
-        try renderMarkdown(w, arena, module_doc.items, false);
+        try renderMarkdown(w, ctx, module_doc.items, false);
         try w.writeAll("</section>\n");
     }
 
-    try w.writeAll("<h2>宣言</h2>\n<p class=\"hint\">ソース内の <code>///</code> コメントから生成。</p>\n");
+    try w.print("<h2>{s}</h2>\n<p class=\"hint\">{s}</p>\n", .{ ctx.spec.declarations, ctx.spec.declarations_hint });
     var i: usize = 0;
     var doc: std.ArrayListUnmanaged(u8) = .empty;
     while (i < rest.items.len) : (i += 1) {
@@ -570,7 +725,7 @@ fn renderZigApi(w: *Io.Writer, arena: Allocator, text: []const u8) !void {
         try w.writeAll("<div class=\"decl\">\n<pre class=\"sig\"><code>");
         try escapeHtml(w, sig_text);
         try w.writeAll("</code></pre>\n<div class=\"doc\">");
-        try renderMarkdown(w, arena, doc.items, false);
+        try renderMarkdown(w, ctx, doc.items, false);
         try w.writeAll("</div>\n</div>\n");
         doc.clearRetainingCapacity();
     }
@@ -578,21 +733,26 @@ fn renderZigApi(w: *Io.Writer, arena: Allocator, text: []const u8) !void {
 
 // ------------------------------------------------------------------ skeleton
 
-fn writeSkeleton(w: *Io.Writer, arena: Allocator, site: *Site, page: *const Page) !void {
+fn writeSkeleton(w: *Io.Writer, arena: Allocator, site: *Site, other: *Site, page: *const Page) !void {
+    const up = try depthPrefix(arena, page.out_name);
+    try w.writeAll("<!DOCTYPE html>\n");
+    try w.print("<html lang=\"{s}\">\n", .{@tagName(site.spec.lang)});
     try w.writeAll(
-        \\<!DOCTYPE html>
-        \\<html lang="ja">
         \\<head>
         \\<meta charset="utf-8">
         \\<meta name="viewport" content="width=device-width, initial-scale=1">
         \\
     );
     try w.print("<title>{s} — ZPU</title>\n", .{page.title});
-    try w.writeAll("<link rel=\"stylesheet\" href=\"");
-    try w.writeAll(try depthPrefix(arena, page.out_name));
-    try w.writeAll("style.css\">\n</head>\n<body>\n<header><a class=\"brand\" href=\"");
-    try w.writeAll(try depthPrefix(arena, page.out_name));
-    try w.writeAll("index.html\">ZPU</a> <span class=\"sub\">a numerical &amp; graphics library for Zig</span></header>\n<div class=\"layout\">\n<aside>\n");
+    try w.print("<link rel=\"stylesheet\" href=\"{s}style.css\">\n</head>\n<body>\n", .{up});
+    try w.print("<header><a class=\"brand\" href=\"{s}index.html\">ZPU</a> <span class=\"sub\">a numerical &amp; graphics library for Zig</span>", .{up});
+    try w.writeAll("<span class=\"lang\"><strong>");
+    try w.writeAll(site.spec.switcher_here);
+    try w.writeAll("</strong>");
+    // the same page in the other language (or that language's index)
+    const alt = site.counterpart(other, page.out_name) orelse try mk(arena, "{s}index.html", .{other.spec.out_prefix});
+    try w.print("<a href=\"{s}{s}\">{s}</a>", .{ up, alt, site.spec.switcher_other });
+    try w.writeAll("</span></header>\n<div class=\"layout\">\n<aside>\n");
     var last_group: []const u8 = "\x00";
     var list_open = false;
     for (site.pages.items) |p| {
@@ -605,13 +765,13 @@ fn writeSkeleton(w: *Io.Writer, arena: Allocator, site: *Site, page: *const Page
         }
         try w.writeAll("<li");
         if (std.mem.eql(u8, p.out_name, page.out_name)) try w.writeAll(" class=\"here\"");
-        try w.print("><a href=\"{s}{s}\">{s}</a></li>\n", .{ try depthPrefix(arena, page.out_name), p.out_name, p.title });
+        try w.print("><a href=\"{s}{s}\">{s}</a></li>\n", .{ up, p.out_name, p.title });
     }
     if (list_open) try w.writeAll("</ul>\n");
     try w.writeAll("</aside>\n<main>\n");
-    if (!std.mem.eql(u8, page.out_name, "index.html")) {
+    if (std.mem.indexOf(u8, page.out_name, "index.html") == null) {
         try w.print("<h1>{s}</h1>\n", .{page.title});
-        try w.print("<p class=\"src\">元ファイル: <a href=\"{s}{s}\">{s}</a></p>\n", .{ repo_prefix, page.src_name, page.src_name });
+        try w.print("<p class=\"src\">{s}<a href=\"{s}{s}\">{s}</a></p>\n", .{ site.spec.source_line, repo_prefix, page.src_name, page.src_name });
     }
     try w.writeAll(page.body);
     try w.writeAll("</main>\n</div>\n<footer>ZPU — generated by <code>zig build doc</code> (docs/build_docs.zig). No Python involved.</footer>\n</body>\n</html>\n");
@@ -636,6 +796,8 @@ const style_css =
     \\header { padding: .8rem 1.2rem; border-bottom: 1px solid #8883; display: flex; gap: .6rem; align-items: baseline; }
     \\header .brand { font-weight: 700; font-size: 1.2rem; color: var(--accent); text-decoration: none; }
     \\header .sub { color: var(--muted); font-size: .85rem; }
+    \\header .lang { margin-left: auto; font-size: .85rem; }
+    \\header .lang a { margin-left: .4rem; }
     \\.layout { display: flex; align-items: flex-start; }
     \\aside { flex: 0 0 15rem; padding: 1rem; border-right: 1px solid #8883; position: sticky; top: 0; max-height: 100vh; overflow: auto; }
     \\aside h4 { margin: 1rem 0 .2rem; font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }

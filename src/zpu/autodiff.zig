@@ -177,10 +177,9 @@ const NoRule = enum {
 
 const no_rule = struct {
     const zero = [_]Prim{
-        .floor, .ceil,   .round,     .trunc,     .sign,    .isnan,      .isinf,       .isfinite,
-        .argmax, .argmin, .all_reduce, .any_reduce, .constant,
-        .eq,     .ne,     .lt,        .le,        .gt,      .ge,
-        .logical_and, .logical_or, .logical_xor, .logical_not,
+        .floor,  .ceil,   .round,      .trunc,       .sign,       .isnan,       .isinf,       .isfinite,
+        .argmax, .argmin, .all_reduce, .any_reduce,  .constant,   .eq,          .ne,          .lt,
+        .le,     .gt,     .ge,         .logical_and, .logical_or, .logical_xor, .logical_not,
     };
     // `conv` (a 4-D convolution over batches) and the Cholesky factorisation
     // have known VJPs, but they need primitives ZPU does not have yet:
@@ -210,7 +209,7 @@ comptime {
     @setEvalBranchQuota(10_000);
     const info = @typeInfo(Prim).@"enum";
     for (info.field_names, info.field_values) |name, value| {
-        const p: Prim = @enumFromInt(value);
+        const p: Prim = @fromBackingInt(@intCast(value));
         if ((classify(p) != .rule) == prims.differentiable(p))
             @compileError("Prim." ++ name ++ ": `no_rule` and `differentiable()` disagree");
     }
