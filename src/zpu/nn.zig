@@ -338,7 +338,11 @@ pub fn conv2d(x: Tensor, w: Tensor, stride: usize, padding: usize) Error!Tensor 
             const moved_back = try ops.transpose(prod, &.{ 0, 2, 1 });
             defer ops.releaseTemp(moved_back);
             const shaped = try ops.reshape(moved_back, try Shape.init(&.{ n, f, oh, ow }));
-            defer ops.releaseTemp(shaped);
+            // Ownership moves to exactly one of the two branches below: the
+            // accumulator takes it on the first iteration, `add` consumes it on
+            // every later one. A `defer` here as well would release it twice —
+            // which frees the buffer twice once no tracker is installed (the
+            // benchmark is what caught that).
             if (out) |o| {
                 const s = try ops.add(o, shaped);
                 ops.releaseTemp(shaped);

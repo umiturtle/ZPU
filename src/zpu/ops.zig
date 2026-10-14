@@ -1229,13 +1229,16 @@ pub fn reshape(x: Tensor, requested: Shape) Error!Tensor {
         out = try finish(.reshape, &.{x}, out, .{ .shape = target.dims, .shape_len = @intCast(target.rank()) });
         return out;
     }
-    // Non-contiguous: materialise, then view the copy.
+    // Non-contiguous: materialise, then view the copy. The view has to own a
+    // reference of its own (and a fresh id): `c` is a temporary, and without a
+    // tracker installed its `releaseTemp` below really does free the buffer.
     const c = try x.toContiguous();
     defer releaseTemp(c);
     var t = c;
     t.shape = target;
     t.strides = target.stridesContiguous();
     t.batch_depth = x.batch_depth;
+    t.id = @import("tensor.zig").Tensor.viewOf(c, target, target.stridesContiguous(), 0).id;
     var out = t;
     out = try finish(.reshape, &.{x}, out, .{ .shape = target.dims, .shape_len = @intCast(target.rank()) });
     return out;

@@ -649,6 +649,34 @@ test "nn: conv2d" {
     try check(conv, &.{ 6, 8, 12, 14 }, 1e-12);
 }
 
+test "reshape of a strided view owns its materialised copy" {
+    // Outside a scope `releaseTemp` frees for real, so a view that forgets to
+    // take a reference of its own is a use-after-free — the shape the benchmark
+    // runs in (it is what turned into a SIGSEGV in CI).
+    try setup();
+    const a = try arr(f64, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 }, &.{ 1, 1, 3, 3 });
+    defer a.deinit();
+    const t = try zpu.transpose(a, &.{ 0, 1, 3, 2 });
+    defer t.deinit();
+    const r = try zpu.reshape(t, try S.init(&.{ 1, 1, 9 }));
+    defer r.deinit();
+    try check(r, &.{ 1, 4, 7, 2, 5, 8, 3, 6, 9 }, 1e-12);
+}
+
+test "conv2d keeps its temporaries balanced without a scope" {
+    // No `Scope` on purpose: `releaseTemp` only no-ops while a tracker is
+    // installed, so this is the shape the benchmark runs in (and the shape that
+    // catches a temporary released twice).
+    try setup();
+    const input = try arr(f64, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 }, &.{ 1, 1, 3, 3 });
+    defer input.deinit();
+    const kernel = try arr(f64, &.{ 1, 0, 0, 1 }, &.{ 1, 1, 2, 2 });
+    defer kernel.deinit();
+    const conv = try zpu.nn.conv2d(input, kernel, 1, 0);
+    defer conv.deinit();
+    try check(conv, &.{ 6, 8, 12, 14 }, 1e-12);
+}
+
 test "optimisers minimise a quadratic" {
     try setup();
     var scope = try zpu.Scope.init(alloc);

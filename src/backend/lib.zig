@@ -67,9 +67,16 @@ pub const Windows = struct {
 
 test "a library that is not there fails, and a library that is there opens" {
     // The assertion that matters on every platform: a missing driver is a clean
-    // `null`/error, never a crash — `tryLoad` and `probe` rely on that to answer
-    // "no Vulkan on this machine".
-    try std.testing.expectError(error.FileNotFound, Library.open("/nonexistent/zpu-does-not-exist.so"));
+    // error, never a crash — `tryLoad` and `probe` rely on that to answer "no
+    // Vulkan on this machine". The two implementations name it differently
+    // (`FileNotFound` from the ELF loader, `NotFound` from the Windows mapping).
+    if (Library.open("/nonexistent/zpu-does-not-exist.so")) |lib| {
+        var l = lib;
+        l.close();
+        return error.ExpectedMissingLibrary;
+    } else |e| {
+        try std.testing.expect(e == error.FileNotFound or e == error.NotFound);
+    }
 
     if (builtin.os.tag == .windows) {
         const kernel = try Library.open("kernel32.dll");

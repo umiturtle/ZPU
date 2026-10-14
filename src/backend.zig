@@ -1227,13 +1227,31 @@ test "available() lists the cpu backend at least" {
     try testing.expectEqual(Backend.cpu, list[list.len - 1]);
 }
 
+/// The device these tests exercise the GPU path on, or `null` when this machine
+/// has nothing to run on.
+///
+/// A loader with no ICD behind it — a plain CI runner, a container with
+/// `libvulkan1` installed and no driver — enumerates **zero** devices. `probe`
+/// says exactly that (`has(vulkan)`, `device_count == 0`), so it is not a
+/// failure: those machines are covered by the CPU fallback tests. A loader that
+/// *does* report a device, on the other hand, has to open — that is the part
+/// worth being strict about.
+fn testDevice(backend: Backend) !?*Device {
+    const report = probe();
+    if (!report.has(backend)) return null;
+    const dev = try device(backend);
+    if (dev == null) {
+        try testing.expectEqual(@as(u32, 0), report.detail(backend).device_count);
+    }
+    return dev;
+}
+
 test "when a driver is installed the kernel really runs on the device" {
     // On a machine with no driver the CPU fallback (tested above) is all there
     // is, and `probe` says so. When the probe *does* see a driver — a real GPU,
     // or a software rasterizer such as SwiftShader or lavapipe — the device has
     // to open and the shipped SPIR-V has to produce the right numbers.
-    if (!probe().has(.vulkan)) return;
-    const dev = (try device(.vulkan)) orelse return error.DeviceRefused;
+    const dev = (try testDevice(.vulkan)) orelse return;
     defer shutdownDevices();
 
     var data: [256]f32 = undefined;
@@ -1333,8 +1351,7 @@ test "device buffers hold a kernel's data between dispatches" {
 }
 
 test "resident buffers keep their data on a real device" {
-    if (!probe().has(.vulkan)) return;
-    const dev = (try device(.vulkan)) orelse return error.DeviceRefused;
+    const dev = (try testDevice(.vulkan)) orelse return;
     defer shutdownDevices();
 
     const Scale = struct {
