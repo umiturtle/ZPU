@@ -111,12 +111,43 @@ fn capsOf(backend: Backend) Capabilities {
     };
 }
 
+/// What a probe learned about one backend. The name buffers are fixed size so a
+/// probe never allocates and can run before the allocator is configured.
+pub const Info = struct {
+    available: bool = false,
+    /// The library that answered, `null` for the CPU.
+    library_path: ?[]const u8 = null,
+    /// Loader / driver API version, packed the way the API packs it.
+    api_version: u32 = 0,
+    /// Number of devices the loader reported (0 when it cannot be asked).
+    device_count: u32 = 0,
+    names: [8][256]u8 = @splat(@splat(0)),
+    name_lens: [8]u16 = @splat(0),
+    /// Set when a name was filled in.
+    names_len: u8 = 0,
+
+    pub fn deviceName(self: *const Info, i: usize) []const u8 {
+        if (i >= self.names_len) return "";
+        const len = self.name_lens[i];
+        return self.names[i][0..len];
+    }
+
+    /// `major.minor` of an API version packed as Vulkan does.
+    pub fn versionString(self: *const Info, buf: *[16]u8) []const u8 {
+        const major = self.api_version >> 22;
+        const minor = (self.api_version >> 12) & 0x3ff;
+        if (self.api_version == 0) return "";
+        return std.fmt.bufPrint(buf, "{d}.{d}", .{ major, minor }) catch "";
+    }
+};
+
 pub const Report = struct {
     cpu: bool,
     webgpu: bool,
     metal: bool,
     vulkan: bool,
     d3d12: bool,
+    info: [5]Info = @splat(.{}),
 
     /// The best backend available on this machine (never fails: `cpu` is always
     /// present).
@@ -137,38 +168,192 @@ pub const Report = struct {
             .d3d12 => self.d3d12,
         };
     }
+
+    pub fn detail(self: *const Report, b: Backend) *const Info {
+        return &self.info[@backingInt(b)];
+    }
 };
 
-/// Opens every candidate driver and reports which ones answered. Called once
-/// per process by `zpu.init`.
+/// Opens every candidate driver and reports what it found. Called once per
+/// process by `zpu.init`; safe to call anywhere, allocates nothing.
 pub fn probe() Report {
-    return .{
-        .cpu = true,
-        .webgpu = probeBackend(.webgpu),
-        .metal = probeBackend(.metal),
-        .vulkan = probeBackend(.vulkan),
-        .d3d12 = probeBackend(.d3d12),
+    var report = Report{ .cpu = true, .webgpu = false, .metal = false, .vulkan = false, .d3d12 = false };
+    report.info[@backingInt(Backend.cpu)] = .{
+        .available = true,
+        .api_version = 0,
+        .device_count = 1,
     };
+    for (ALL) |b| {
+        if (b == .cpu) continue;
+        const info = probeBackend(b);
+        report.info[@backingInt(b)] = info;
+        switch (b) {
+            .webgpu => report.webgpu = info.available,
+            .metal => report.metal = info.available,
+            .vulkan => report.vulkan = info.available,
+            .d3d12 => report.d3d12 = info.available,
+            .cpu => {},
+        }
+    }
+    return report;
 }
 
-fn probeBackend(backend: Backend) bool {
+fn probeBackend(backend: Backend) Info {
     for (libraryNames(backend)) |name| {
         var lib = std.DynLib.open(name) catch continue;
-        lib.close();
-        return true;
+        defer lib.close();
+        var info = Info{ .available = true, .library_path = name };
+        switch (backend) {
+            .vulkan => vulkanProbe(&lib, &info),
+            .metal => symbolProbe(&lib, "MTLCreateSystemDefaultDevice", &info),
+            .d3d12 => symbolProbe(&lib, "D3D12CreateDevice", &info),
+            .webgpu => symbolProbe(&lib, "wgpuCreateInstance", &info),
+            .cpu => {},
+        }
+        return info;
     }
-    return false;
+    return .{};
+}
+
+/// A driver is usable when the entry point the backend needs exists.
+fn symbolProbe(lib: *std.DynLib, symbol: [:0]const u8, info: *Info) void {
+    if (lib.lookup(*const anyopaque, symbol) == null) {
+        info.available = false;
+        return;
+    }
+    info.device_count = 1;
+    const short = symbol[0..@min(symbol.len, info.names[0].len)];
+    @memcpy(info.names[0][0..short.len], short);
+    info.name_lens[0] = @intCast(short.len);
+    info.names_len = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Vulkan loader probe
+//
+// The Vulkan loader is a plain C ABI, so a probe can create an instance,
+// enumerate the physical devices and read their names without any SDK headers
+// being present at build time. The struct layouts below are the first fields of
+// the real ones; `VkPhysicalDeviceProperties` is read into an oversized buffer
+// because the driver writes the whole struct.
+// ---------------------------------------------------------------------------
+const vk = struct {
+    const Success: i32 = 0;
+    const ApplicationInfoStype: u32 = 0;
+    const InstanceCreateInfoStype: u32 = 1;
+    const physical_device_type_discrete_gpu: u32 = 2;
+
+    const ApplicationInfo = extern struct {
+        sType: u32 = ApplicationInfoStype,
+        pNext: ?*const anyopaque = null,
+        pApplicationName: ?[*:0]const u8 = "zpu",
+        applicationVersion: u32 = 1,
+        pEngineName: ?[*:0]const u8 = "zpu",
+        engineVersion: u32 = 1,
+        apiVersion: u32 = (1 << 22),
+    };
+
+    const InstanceCreateInfo = extern struct {
+        sType: u32 = InstanceCreateInfoStype,
+        pNext: ?*const anyopaque = null,
+        flags: u32 = 0,
+        pApplicationInfo: ?*const ApplicationInfo = null,
+        enabledLayerCount: u32 = 0,
+        ppEnabledLayerNames: ?[*]const [*:0]const u8 = null,
+        enabledExtensionCount: u32 = 0,
+        ppEnabledExtensionNames: ?[*]const [*:0]const u8 = null,
+    };
+
+    const CreateInstanceFn = *const fn (*const InstanceCreateInfo, ?*const anyopaque, *?*anyopaque) callconv(.c) i32;
+    const EnumerateInstanceVersionFn = *const fn (*u32) callconv(.c) i32;
+    const GetInstanceProcAddrFn = *const fn (?*anyopaque, [*:0]const u8) callconv(.c) ?*const anyopaque;
+    const EnumeratePhysicalDevicesFn = *const fn (?*anyopaque, *u32, ?[*]?*anyopaque) callconv(.c) i32;
+    const GetPhysicalDevicePropertiesFn = *const fn (?*anyopaque, *anyopaque) callconv(.c) void;
+    const DestroyInstanceFn = *const fn (?*anyopaque, ?*const anyopaque) callconv(.c) void;
+};
+
+fn vulkanProbe(lib: *std.DynLib, info: *Info) void {
+    const gpa = lib.lookup(vk.GetInstanceProcAddrFn, "vkGetInstanceProcAddr") orelse {
+        info.available = false;
+        return;
+    };
+
+    // loader version (optional: 1.0 loaders do not export it)
+    if (gpa(null, "vkEnumerateInstanceVersion")) |ptr| {
+        const f: vk.EnumerateInstanceVersionFn = @ptrCast(ptr);
+        var version: u32 = 0;
+        if (f(&version) == vk.Success) info.api_version = version;
+    }
+
+    const create_ptr = gpa(null, "vkCreateInstance") orelse {
+        info.available = false;
+        return;
+    };
+    const create: vk.CreateInstanceFn = @ptrCast(create_ptr);
+
+    var app = vk.ApplicationInfo{};
+    var ci = vk.InstanceCreateInfo{ .pApplicationInfo = &app };
+    if (info.api_version >= (1 << 22)) {
+        app.apiVersion = @min(info.api_version, @as(u32, 3 << 22));
+        ci.pApplicationInfo = &app;
+    }
+    var instance: ?*anyopaque = null;
+    if (create(&ci, null, &instance) != vk.Success) {
+        // The loader is present but no driver answered: still usable in
+        // principle, just not on this machine.
+        info.available = true;
+        info.device_count = 0;
+        return;
+    }
+    const inst = instance orelse {
+        info.device_count = 0;
+        return;
+    };
+    defer {
+        if (gpa(inst, "vkDestroyInstance")) |ptr| {
+            const destroy: vk.DestroyInstanceFn = @ptrCast(ptr);
+            destroy(inst, null);
+        }
+    }
+
+    const enum_ptr = gpa(inst, "vkEnumeratePhysicalDevices") orelse return;
+    const enumerate: vk.EnumeratePhysicalDevicesFn = @ptrCast(enum_ptr);
+    const props_ptr = gpa(inst, "vkGetPhysicalDeviceProperties") orelse return;
+    const get_props: vk.GetPhysicalDevicePropertiesFn = @ptrCast(props_ptr);
+
+    var count: u32 = 0;
+    if (enumerate(inst, &count, null) != vk.Success) return;
+    info.device_count = count;
+    if (count == 0) return;
+
+    var devices: [8]?*anyopaque = @splat(null);
+    var want: u32 = @min(count, 8);
+    if (enumerate(inst, &want, &devices) != vk.Success) return;
+
+    for (devices[0..want], 0..) |dev, i| {
+        // The driver fills the whole VkPhysicalDeviceProperties; the fields we
+        // read are the first ones, so an oversized zeroed buffer is safe.
+        var props: [2048]u8 = @splat(0);
+        get_props(dev, &props);
+        const api_version = std.mem.readInt(u32, props[0..4], .little);
+        if (i == 0) info.api_version = api_version;
+        const dev_name = props[20..276]; // VkPhysicalDeviceProperties.deviceName
+        const len = std.mem.indexOfScalar(u8, dev_name, 0) orelse dev_name.len;
+        const n = @min(len, info.names[i].len);
+        @memcpy(info.names[i][0..n], dev_name[0..n]);
+        info.name_lens[i] = @intCast(n);
+    }
+    info.names_len = @intCast(want);
 }
 
 /// The concrete driver found for `backend`, or `null`.
 pub fn open(backend: Backend) ?Runtime {
     if (backend == .cpu) return .{ .backend = .cpu, .library_path = null, .caps = capsOf(.cpu) };
-    for (libraryNames(backend)) |name| {
-        var lib = std.DynLib.open(name) catch continue;
-        lib.close();
-        return .{ .backend = backend, .library_path = name, .caps = capsOf(backend) };
-    }
-    return null;
+    const info = probeBackend(backend);
+    if (!info.available) return null;
+    var caps = capsOf(backend);
+    if (info.device_count == 0) caps.compute = false;
+    return .{ .backend = backend, .library_path = info.library_path, .caps = caps };
 }
 
 /// Whether a GPU backend is usable right now. ZPU uses this to decide between
@@ -213,6 +398,10 @@ pub const Kernel = struct {
     body: *const fn (*KernelCtx) void,
     /// Shading-language body, or `null` when the kernel is CPU only.
     source: ?Source = null,
+    /// Precompiled bytecode (SPIR-V) for backends that cannot compile source
+    /// themselves. Shipping this is optional: without it the kernel falls back
+    /// to the CPU.
+    spirv: ?[]const u32 = null,
 
     /// Shading source templates, one per language. `{name}` is replaced by the
     /// kernel name and `{threads}` by the workgroup size.
@@ -222,6 +411,19 @@ pub const Kernel = struct {
         glsl: ?[]const u8 = null,
         hlsl: ?[]const u8 = null,
     };
+
+    /// Whether `backend` can actually execute this kernel: the CPU always can,
+    /// other backends need either source in their shading language or
+    /// precompiled bytecode.
+    pub fn canRun(self: Kernel, backend: Backend) bool {
+        return switch (backend.shadingLanguage()) {
+            .zig => true,
+            .glsl => self.spirv != null,
+            .wgsl => if (self.source) |src| src.wgsl != null else false,
+            .msl => if (self.source) |src| src.msl != null else false,
+            .hlsl => if (self.source) |src| src.hlsl != null else false,
+        };
+    }
 
     /// Renders the kernel for a backend, or `null` when that backend has no
     /// source for it (the caller then falls back to the CPU body).
@@ -246,19 +448,25 @@ pub const Kernel = struct {
         errdefer out.deinit(alloc);
         var i: usize = 0;
         while (i < text.len) {
+            // Only `{name}` and `{threads}` are placeholders. Any other brace is
+            // literal shader code (`void main() { ... }`), so it is copied as is.
             if (text[i] == '{') {
-                const close = std.mem.indexOfScalarPos(u8, text, i, '}') orelse return Error.InvalidSource;
-                const key = text[i + 1 .. close];
-                if (std.mem.eql(u8, key, "name")) {
-                    try out.appendSlice(alloc, self.name);
-                } else if (std.mem.eql(u8, key, "threads")) {
-                    try out.print(alloc, "{d}", .{threads});
-                } else return Error.InvalidSource;
-                i = close + 1;
-            } else {
-                try out.append(alloc, text[i]);
-                i += 1;
+                if (std.mem.indexOfScalarPos(u8, text, i, '}')) |close| {
+                    const key = text[i + 1 .. close];
+                    if (std.mem.eql(u8, key, "name")) {
+                        try out.appendSlice(alloc, self.name);
+                        i = close + 1;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, key, "threads")) {
+                        try out.print(alloc, "{d}", .{threads});
+                        i = close + 1;
+                        continue;
+                    }
+                }
             }
+            try out.append(alloc, text[i]);
+            i += 1;
         }
         return try out.toOwnedSlice(alloc);
     }
@@ -323,6 +531,50 @@ pub fn dispatch(backend: Backend, kernel: Kernel, ctx: *KernelCtx) Error!void {
     }
 }
 
+/// Runs `kernel` over `ctx.count` invocations using `thread_count` OS threads.
+///
+/// The CPU backend is a complete implementation, not a debug fallback, so it
+/// has the same execution model as a GPU dispatch: invocations are independent,
+/// and each worker walks a strided slice of the global id space. A kernel that
+/// needs cross-invocation ordering (a scan, for example) must not use this.
+pub fn dispatchThreaded(backend: Backend, kernel: Kernel, ctx: *KernelCtx, thread_count: usize) Error!void {
+    const workers = @max(@min(thread_count, ctx.count), 1);
+    if (backend != .cpu or workers == 1) return dispatch(backend, kernel, ctx);
+
+    var failures = std.atomic.Value(usize).init(0);
+    var handles: [max_threads]std.Thread = undefined;
+    var spawned: usize = 0;
+    const self_index = workers - 1;
+    for (0..self_index) |i| {
+        handles[spawned] = std.Thread.spawn(.{}, workerBody, .{ kernel, ctx, i, workers, &failures }) catch break;
+        spawned += 1;
+    }
+    workerBody(kernel, ctx, self_index, workers, &failures);
+    // Slices whose thread could not be spawned run here instead.
+    for (spawned..self_index) |i| workerBody(kernel, ctx, i, workers, &failures);
+    for (handles[0..spawned]) |h| h.join();
+    if (failures.load(.monotonic) != 0) return Error.KernelFailed;
+}
+
+pub const max_threads = 64;
+
+fn workerBody(kernel: Kernel, ctx: *KernelCtx, slice: usize, workers: usize, failures: *std.atomic.Value(usize)) void {
+    // Each worker gets its own copy of the context, so `id` is private while the
+    // buffers stay shared — the same split a GPU makes between shared memory and
+    // per-invocation registers.
+    var local = ctx.*;
+    local.id = 0;
+    var id = slice;
+    while (id < ctx.count) : (id += workers) {
+        local.id = id;
+        kernel.body(&local);
+        if (local.barriers.failed) {
+            _ = failures.fetchAdd(1, .monotonic);
+            return;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -367,8 +619,8 @@ test "kernels lower to each shading language" {
         }.body,
         .source = .{
             .wgsl = "@compute @workgroup_size({threads}) fn {name}() {}",
-            .msl = "kernel void {name}() {{}}",
-            .glsl = "#version 450\nvoid main() {} // {name}",
+            .msl = "kernel void {name}() {}",
+            .glsl = "#version 450\nvoid main() { imageStore(0, ivec2(0), vec4(0.0)); } // {name}",
             .hlsl = "[numthreads({threads},1,1)] void {name}() {}",
         },
     };
@@ -389,6 +641,79 @@ test "kernels lower to each shading language" {
     // A kernel without source cannot be lowered for a GPU either.
     const plain = Kernel{ .name = "plain", .body = k.body };
     try testing.expectEqual(@as(?[]u8, null), try plain.lower(.vulkan, testing.allocator, 1));
+}
+
+test "probe detail describes the cpu backend and reports versions" {
+    const r = probe();
+    const cpu = r.detail(.cpu);
+    try testing.expect(cpu.available);
+    try testing.expectEqual(@as(u32, 1), cpu.device_count);
+    try testing.expectEqualStrings("", cpu.deviceName(0));
+
+    var buf: [16]u8 = undefined;
+    var fake = Info{ .api_version = (1 << 22) | (3 << 12) };
+    try testing.expectEqualStrings("1.3", fake.versionString(&buf));
+    fake.api_version = 0;
+    try testing.expectEqualStrings("", fake.versionString(&buf));
+
+    // A backend that is not present must not claim devices.
+    if (!r.vulkan) try testing.expectEqual(@as(u32, 0), r.detail(.vulkan).device_count);
+    if (!r.metal) try testing.expect(!r.detail(.metal).available);
+}
+
+test "threaded dispatch matches serial dispatch" {
+    const Scale = struct {
+        fn body(ctx: *KernelCtx) void {
+            const out = ctx.buffers[0].as(f64);
+            out[ctx.id] = out[ctx.id] * 2 + 1;
+        }
+    };
+    const kernel = Kernel{ .name = "scale", .body = Scale.body };
+    const n = 4096;
+    var serial: [n]f64 = undefined;
+    var threaded: [n]f64 = undefined;
+    for (&serial, 0..) |*v, i| v.* = @floatFromInt(i);
+    @memcpy(&threaded, &serial);
+
+    var s_bufs = [_]Buffer{.{ .ptr = @ptrCast(&serial), .len = @sizeOf(@TypeOf(serial)) }};
+    var s_ctx = KernelCtx{ .buffers = &s_bufs, .count = n };
+    try dispatch(.cpu, kernel, &s_ctx);
+
+    var t_bufs = [_]Buffer{.{ .ptr = @ptrCast(&threaded), .len = @sizeOf(@TypeOf(threaded)) }};
+    var t_ctx = KernelCtx{ .buffers = &t_bufs, .count = n };
+    try dispatchThreaded(.cpu, kernel, &t_ctx, 4);
+
+    try testing.expectEqualSlices(f64, &serial, &threaded);
+}
+
+test "threaded dispatch reports a kernel failure" {
+    const Boom = struct {
+        fn body(ctx: *KernelCtx) void {
+            if (ctx.id == 3) ctx.barriers.fail("deliberate");
+        }
+    };
+    var data: [16]f64 = @splat(0);
+    var bufs = [_]Buffer{.{ .ptr = @ptrCast(&data), .len = @sizeOf(@TypeOf(data)) }};
+    var ctx = KernelCtx{ .buffers = &bufs, .count = data.len };
+    try testing.expectError(Error.KernelFailed, dispatchThreaded(.cpu, .{ .name = "boom", .body = Boom.body }, &ctx, 2));
+}
+
+test "canRun decides per backend" {
+    const base = Kernel{ .name = "k", .body = struct {
+        fn body(_: *KernelCtx) void {}
+    }.body };
+    try testing.expect(base.canRun(.cpu));
+    try testing.expect(!base.canRun(.metal));
+    try testing.expect(!base.canRun(.vulkan));
+
+    const wgsl_only = Kernel{ .name = "k", .body = base.body, .source = .{ .wgsl = "x" } };
+    try testing.expect(wgsl_only.canRun(.webgpu));
+    try testing.expect(!wgsl_only.canRun(.metal));
+    try testing.expect(!wgsl_only.canRun(.vulkan));
+
+    const spirv = Kernel{ .name = "k", .body = base.body, .spirv = &.{ 0x07230203, 0, 1, 0 } };
+    try testing.expect(spirv.canRun(.vulkan));
+    try testing.expect(!spirv.canRun(.webgpu));
 }
 
 test "available() lists the cpu backend at least" {

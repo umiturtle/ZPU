@@ -44,8 +44,11 @@ pub const DType = enum(u8) {
     }
 
     pub fn parse(s: []const u8) ?DType {
-        inline for (std.meta.fields(DType)) |f| {
-            if (std.mem.eql(u8, s, f.name)) return @fromBackingInt(@intCast(f.value));
+        // Zig 0.17: `std.meta.fields` is a compile error, and `Type.Enum` exposes
+        // `field_names` / `field_values` instead of an array of fields.
+        const info = @typeInfo(DType).@"enum";
+        inline for (info.field_names, info.field_values) |fname, fvalue| {
+            if (std.mem.eql(u8, s, fname)) return @fromBackingInt(@intCast(fvalue));
         }
         if (std.mem.eql(u8, s, "float32")) return .f32;
         if (std.mem.eql(u8, s, "float64")) return .f64;

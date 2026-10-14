@@ -119,6 +119,20 @@ pub fn jit(alloc: std.mem.Allocator, f: transforms.Fn, ud: ?*anyopaque) Jit {
 /// The execution-plan machinery used by `jit`.
 pub const plan = @import("zpu/jit.zig");
 
+// ---- execution backends -----------------------------------------------------
+/// The portable execution backend shared with `zgf`.
+pub const zbackend = @import("zbackend");
+/// What this machine offers: `zpu.backends().best()`, `.vulkan`, `.detail(.cpu)` …
+pub const backends = context.backends;
+/// The backend to pick when the caller has no preference.
+pub const bestBackend = context.bestBackend;
+/// A portability helper: `zpu.Backend`, `zpu.Kernel`, `zpu.dispatchKernel` …
+pub const Backend = zbackend.Backend;
+pub const Kernel = zbackend.Kernel;
+pub const KernelCtx = zbackend.KernelCtx;
+pub const dispatchKernel = zbackend.dispatch;
+pub const dispatchKernelThreaded = zbackend.dispatchThreaded;
+
 // ---- op surface -------------------------------------------------------------
 pub const broadcastPair = ops.broadcastPair;
 pub const outDepth = ops.outDepth;
@@ -235,4 +249,30 @@ pub const applyPrim = ops.applyPrim;
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+// -----------------------------------------------------------------------------
+// Module level unit tests
+// -----------------------------------------------------------------------------
+
+// Collects the unit tests written next to each module, so `zig build test`
+// runs them together with the numerical suite in `zpu/tests.zig` (which the
+// aggregation root imports).
+test {
+    _ = @import("zpu/autodiff.zig");
+    _ = @import("zpu/buffer.zig");
+    _ = @import("zpu/context.zig");
+    _ = @import("zpu/dtype.zig");
+    _ = @import("zpu/graph.zig");
+    _ = @import("zpu/jit.zig");
+    _ = @import("zpu/linalg.zig");
+    _ = @import("zpu/ops.zig");
+    _ = @import("zpu/optim.zig");
+    _ = @import("zpu/prims.zig");
+    _ = @import("zpu/rng.zig");
+    _ = @import("zpu/scalar.zig");
+    _ = @import("zpu/shape.zig");
+    _ = @import("zpu/tape.zig");
+    _ = @import("zpu/tensor.zig");
+    _ = @import("zpu/transforms.zig");
 }

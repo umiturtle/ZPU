@@ -6,6 +6,7 @@
 //! the context up on every call, which is what makes `grad`, `vmap` and `jit`
 //! composable without threading extra state through every signature.
 const std = @import("std");
+const zbackend = @import("zbackend");
 
 pub const Mode = enum(u8) {
     /// Plain eager execution, nothing is recorded.
@@ -65,6 +66,23 @@ pub fn allocatorRef() std.mem.Allocator {
     return ctx().allocator();
 }
 
+/// The execution backends detected on this machine (probed once, on demand).
+var backend_report: ?zbackend.Report = null;
+
+/// Probes every backend the library knows (CPU / WebGPU / Metal / Vulkan / D3D12)
+/// and caches the answer. Never fails: the CPU is always available.
+pub fn backends() zbackend.Report {
+    if (backend_report) |r| return r;
+    const r = zbackend.probe();
+    backend_report = r;
+    return r;
+}
+
+/// The backend to use when the caller does not care.
+pub fn bestBackend() zbackend.Backend {
+    return backends().best();
+}
+
 pub const InitOptions = struct {
     /// Number of worker threads used by the element-wise kernels (1 = inline).
     threads: usize = 1,
@@ -84,6 +102,7 @@ pub fn initThreaded(alloc: ?std.mem.Allocator, threads: usize) !void {
 
 /// Tears the context down: stops the pool and resets every field.
 pub fn deinit() void {
+    backend_report = null;
     const c = ctx();
     const alloc = c.alloc;
     c.* = .{};
