@@ -1,0 +1,14 @@
+.{
+    .name = .zpu,
+    .version = "0.1.0",
+    .fingerprint = 0xa977c8d1cadac206,
+    .minimum_zig_version = "0.14.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+        "README.md",
+        "LICENSE",
+    },
+}
