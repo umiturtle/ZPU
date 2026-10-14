@@ -150,9 +150,19 @@ ZPU は 2 つのライブラリを 1 つのリポジトリで育てる。
       `examples` / `bench -- --quick`（`.github/workflows/ci.yml`）、
       `zig-out/doc` を成果物として保存
 * [x] GitHub Pages への配信（`.github/workflows/pages.yml`、`main` への push で公開）
+* [x] **CI が 3 OS すべて green**（ubuntu / macOS / Windows + docs）。
+      Windows は `std.DynLib` が無い（0.17 では `@compileError`）ので、動的
+      ロードを `src/backend/lib.zig`（`kernel32` の `LoadLibraryA`）に寄せて解決
+* [x] **GPU の実行経路を CI で検査**（`gpu` ジョブ）: lavapipe を入れて
+      `ZPU_REQUIRE_GPU=vulkan zig build run-gpu-probe`。GPU の無いランナーでも
+      SPIR-V を実行するデバイスが無いと落ちるので、CPU フォールバックが回帰を
+      隠せない
 * [x] Zig のバージョンは 0.17.0 に固定（CI が ziglang.org から取得）
 * [x] `build.zig.zon` の `minimum_zig_version` を 0.17.0 に合わせる（済）
-* [ ] ベンチ結果を CI のログに残す（回帰検出は `--check` で失敗させる）
+* [ ] ベンチ結果を CI のログに残す（回帰検出は `--check` で失敗させる）。
+      ベンチ自体は CI で走っており、そこが見つけた不具合もある
+      （`reshape` が非連続入力を実体化したとき返すビューが参照を持たず、
+      `conv2d` が解放済みメモリを読んでいた → `37d4757b`）
 * [ ] Pages の有効化（リポジトリ設定）と、最初の green な run の確認
 
 ## M10 — 仕上げ (進行中)
