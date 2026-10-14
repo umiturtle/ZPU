@@ -162,6 +162,60 @@ fn realAxisOf(t: Tensor, axis: i32) usize {
 // The backward rules
 // =============================================================================
 
+/// Primitives that have no backward rule, and what a gradient through them
+/// means. `contribution` answers from this classification, so the compiler
+/// refuses to build a primitive that was never classified — a new op cannot
+/// quietly drop its gradient.
+const Kind = enum { rule, zero, unimplemented };
+const NoRule = enum {
+    /// Discrete / comparison ops: the derivative really is zero.
+    zero,
+    /// The rule is not written yet. Differentiating through it is an error, so
+    /// it can never pass as a plausible looking zero.
+    unimplemented,
+};
+
+const no_rule = struct {
+    const zero = [_]Prim{
+        .floor, .ceil,   .round,     .trunc,     .sign,    .isnan,      .isinf,       .isfinite,
+        .argmax, .argmin, .all_reduce, .any_reduce, .constant,
+        .eq,     .ne,     .lt,        .le,        .gt,      .ge,
+        .logical_and, .logical_or, .logical_xor, .logical_not,
+    };
+    // `conv` (a 4-D convolution over batches) and the Cholesky factorisation
+    // have known VJPs, but they need primitives ZPU does not have yet:
+    // `conv` differentiates to another convolution, Cholesky to a triangular
+    // mask (Murray 2016). `triangular_solve` is a scaled transpose solve.
+    const unimplemented = [_]Prim{ .cholesky, .triangular_solve };
+
+    fn contains(comptime list: []const Prim, comptime p: Prim) bool {
+        for (list) |q| if (q == p) return true;
+        return false;
+    }
+};
+
+/// How a gradient flows through `p`: `.rule` (see the switch in
+/// `contribution`), `.zero`, or `.unimplemented`.
+fn classify(comptime p: Prim) Kind {
+    @setEvalBranchQuota(10_000);
+    if (no_rule.contains(&no_rule.zero, p)) return .zero;
+    if (no_rule.contains(&no_rule.unimplemented, p)) return .unimplemented;
+    return .rule;
+}
+
+comptime {
+    // Every primitive is either differentiable, and then `contribution` has a
+    // rule for it, or it is classified above. Anything else is a mistake that
+    // would silently drop gradients at run time, so it fails the build instead.
+    @setEvalBranchQuota(10_000);
+    const info = @typeInfo(Prim).@"enum";
+    for (info.field_names, info.field_values) |name, value| {
+        const p: Prim = @enumFromInt(value);
+        if ((classify(p) != .rule) == prims.differentiable(p))
+            @compileError("Prim." ++ name ++ ": `no_rule` and `differentiable()` disagree");
+    }
+}
+
 /// Returns d(out)/d(input[i]) * g, or null when the input is not
 /// differentiable. The result has the shape of `node.inputs[i]`.
 pub fn contribution(node: *const Node, i: usize, g: Tensor) Error!?Tensor {
@@ -399,6 +453,8 @@ pub fn contribution(node: *const Node, i: usize, g: Tensor) Error!?Tensor {
             break :blk out;
         },
         .cast_op => try ops.cast(g, a.dtype()),
+        // `copy` is the identity: hand the incoming gradient straight back.
+        .copy => g,
         .concat_op => blk: {
             if (i == 0) {
                 break :blk try ops.narrow(g, attrs.axis, 0, a.shape.dims[realAxisOf(a, attrs.axis)]);
@@ -421,7 +477,8 @@ pub fn contribution(node: *const Node, i: usize, g: Tensor) Error!?Tensor {
             var rbuf: [MAX_RANK]tmod.Range = undefined;
             break :blk try ops.sliceRanges(g, payloadRanges(a, attrs, &rbuf));
         },
-        .flip => try ops.flip(g, attrs.axis),
+        // `reverse` is `flip` along an axis, and both are their own inverse.
+        .flip, .reverse => try ops.flip(g, attrs.axis),
         .cumsum => try ops.cumsum(g, attrs.axis, !attrs.reverse()),
         .lerp, .clamp => null,
         .stack_op => blk: {
@@ -429,7 +486,17 @@ pub fn contribution(node: *const Node, i: usize, g: Tensor) Error!?Tensor {
             if (i == 0) break :blk try ops.squeeze(g, attrs.axis);
             break :blk try ops.squeeze(g, attrs.axis);
         },
-        else => null,
+
+        // Everything else is classified above: `zero` primitives contribute
+        // nothing, `unimplemented` ones refuse to produce a gradient, and a
+        // primitive that is in neither place fails to compile.
+        inline else => |p| blk: {
+            switch (comptime classify(p)) {
+                .zero => break :blk null,
+                .unimplemented => return Error.NotSupported,
+                .rule => @compileError("no backward rule for primitive " ++ @tagName(p)),
+            }
+        },
     };
 
     if (raw) |r| {

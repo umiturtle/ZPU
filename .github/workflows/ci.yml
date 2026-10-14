@@ -1,0 +1,99 @@
+# CI for ZPU / ZGF.
+#
+# The toolchain is the only thing CI installs beyond the checkout: Zig 0.17.0 is
+# downloaded from ziglang.org (checked in the same way the project does locally),
+# and every step is a `zig build` invocation. No Python, no package manager, no
+# package registry — the repository has no Zig dependencies to fetch.
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "arena/**"
+  pull_request:
+  workflow_dispatch:
+
+env:
+  ZIG_VERSION: 0.17.0
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }} (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64)   asset="zig-x86_64-linux-$ZIG_VERSION.tar.xz" ;;
+            Linux-aarch64)  asset="zig-aarch64-linux-$ZIG_VERSION.tar.xz" ;;
+            Darwin-arm64)   asset="zig-aarch64-macos-$ZIG_VERSION.tar.xz" ;;
+            Darwin-x86_64)  asset="zig-x86_64-macos-$ZIG_VERSION.tar.xz" ;;
+            *) echo "unsupported runner: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+          esac
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/$ZIG_VERSION/$asset"
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Install Zig ${{ env.ZIG_VERSION }} (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $asset = "zig-x86_64-windows-$env:ZIG_VERSION.zip"
+          curl.exe -fsSL -o zig.zip "https://ziglang.org/download/$env:ZIG_VERSION/$asset"
+          Expand-Archive -Path zig.zip -DestinationPath "$env:RUNNER_TEMP\zig-dl"
+          $dir = Get-ChildItem "$env:RUNNER_TEMP\zig-dl" -Directory | Select-Object -First 1
+          "$($dir.FullName)" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: zig version
+        run: zig version
+
+      - name: Formatting and tests
+        run: zig build check
+
+      - name: Tests (explicit)
+        run: zig build test
+
+      - name: Documentation
+        run: zig build doc
+
+      - name: Examples
+        run: zig build examples
+
+      - name: Benchmark smoke test
+        run: zig build bench -- --quick
+
+  docs:
+    name: docs artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Build the HTML reference
+        run: zig build doc
+
+      - name: Upload the generated site
+        uses: actions/upload-artifact@v4
+        with:
+          name: zpu-docs
+          path: zig-out/doc
+          if-no-files-found: error

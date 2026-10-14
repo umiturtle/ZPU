@@ -220,7 +220,7 @@ test "prim arity" {
 /// True when the primitive has a meaningful derivative.
 pub fn differentiable(p: Prim) bool {
     return switch (p) {
-        .floor, .ceil, .round, .trunc, .sign, .isnan, .isinf, .isfinite, .argmax, .argmin, .all_reduce, .any_reduce, .constant, .eq, .ne, .lt, .le, .gt, .ge, .logical_and, .logical_or, .logical_xor, .logical_not => false,
+        .floor, .ceil, .round, .trunc, .sign, .isnan, .isinf, .isfinite, .argmax, .argmin, .all_reduce, .any_reduce, .constant, .eq, .ne, .lt, .le, .gt, .ge, .logical_and, .logical_or, .logical_xor, .logical_not, .cholesky, .triangular_solve => false,
         else => true,
     };
 }
