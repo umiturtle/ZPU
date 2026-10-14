@@ -231,6 +231,14 @@ Vulkan と WebGPU を先に完成させる。残り 2 つは検出コードと `
 (3) エントリポイント表の網羅性（comptime）、(4) 実行できないときに `null` を
 返して CPU に落ちること、(5) CPU 実行の同値性、の 5 つ。
 
+**CI でも同じ検査を回す。** `.github/workflows/ci.yml` の `gpu` ジョブは
+ソフトウェア Vulkan（lavapipe、`mesa-vulkan-drivers`）を入れて
+`ZPU_REQUIRE_GPU=vulkan zig build run-gpu-probe` を実行する。この環境変数は
+「名前を挙げたバックエンドがデバイスを開き、カーネルを実行した」ことを要求し、
+そうでなければジョブを失敗させる — CPU へのフォールバックが回帰を隠せない
+ようにするため。ランナーに GPU は無いが、lavapipe は本物の SPIR-V を実行する
+ので、Vulkan の実行経路は push のたびに検査される。
+
 ## 注意
 
 * `Backend.ALL` は 5 つを固定順で並べるので、UI やログは例外分岐なしで回せる。

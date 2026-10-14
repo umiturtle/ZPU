@@ -144,6 +144,7 @@ pub fn main(init: std.process.Init) !void {
     try out.print("\ndevices:\n", .{});
     var all_ok = ok;
     var gpu_ran: ?zb.Backend = null;
+    var device_ran: [zb.ALL.len]bool = @splat(false);
     for (zb.ALL) |b| {
         const maybe = try zb.openDevice(b);
         if (maybe == null) {
@@ -152,7 +153,6 @@ pub fn main(init: std.process.Init) !void {
         }
         var dev = maybe.?;
         defer dev.deinit();
-        if (b != .cpu) gpu_ran = b;
         if (!Scale.kernel.canRun(b)) {
             try out.print("  {s:<8} open, but the kernel has no {s} code\n", .{ b.name(), b.name() });
             continue;
@@ -166,6 +166,8 @@ pub fn main(init: std.process.Init) !void {
             if (@abs(v - want) > 1e-3) good = false;
         }
         all_ok = all_ok and good;
+        device_ran[@backingInt(b)] = true;
+        if (b != .cpu) gpu_ran = b;
         try out.print("  {s:<8} ran {d} invocations: {s} (data[3] = {d})\n", .{ b.name(), n, if (good) "correct" else "WRONG", data[3] });
     }
     // The same kernel with data that stays on the device: allocate once, write
@@ -244,6 +246,31 @@ pub fn main(init: std.process.Init) !void {
     // optional (the process exit does it), but saying so explicitly is tidier.
     zb.shutdownDevices();
     try out.flush();
+
+    // A runner that installs a software driver wants to know the driver really
+    // ran, not that the probe found nothing and the CPU took over:
+    // `ZPU_REQUIRE_GPU=vulkan` fails the run unless that backend opened a device
+    // *and* dispatched the kernel on it. Nothing is required by default, so a
+    // machine without a GPU still passes.
+    if (init.environ_map.get("ZPU_REQUIRE_GPU")) |want| {
+        var missing: usize = 0;
+        var names = std.mem.tokenizeAny(u8, want, ", \t");
+        while (names.next()) |name| {
+            const b = zb.parseBackend(name) orelse {
+                try out.print("\nZPU_REQUIRE_GPU: unknown backend \"{s}\"\n", .{name});
+                try out.flush();
+                return error.UnknownBackend;
+            };
+            if (!device_ran[@backingInt(b)]) {
+                try out.print("\nZPU_REQUIRE_GPU: {s} did not run a kernel on a device\n", .{name});
+                missing += 1;
+            }
+        }
+        if (missing != 0) {
+            try out.flush();
+            return error.BackendUnavailable;
+        }
+    }
 
     // Every device that ran the kernel had to produce the same numbers as the
     // CPU. This is what makes the example usable as a check: a wrong result, or

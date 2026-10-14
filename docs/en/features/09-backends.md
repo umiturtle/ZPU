@@ -236,6 +236,14 @@ tests pin sizes and offsets), (3) completeness of the entry-point table
 (comptime), (4) returning `null` and falling back to the CPU when a backend
 cannot run, and (5) CPU execution equivalence.
 
+**CI runs the same checks.** The `gpu` job in `.github/workflows/ci.yml` installs
+a software Vulkan driver (lavapipe, from `mesa-vulkan-drivers`) and runs
+`ZPU_REQUIRE_GPU=vulkan zig build run-gpu-probe`. That variable demands that the
+named backend opened a device *and* dispatched the kernel on it, and fails the
+job otherwise — so the CPU fallback cannot hide a regression. A runner has no
+GPU, but lavapipe executes real SPIR-V, which is why the Vulkan path is
+exercised on every push.
+
 ## Notes
 
 * `Backend.ALL` lists all five in a fixed order, so UIs and logs need no special
