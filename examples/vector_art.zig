@@ -221,12 +221,15 @@ fn report(out: *Io.Writer, img: Image) !void {
     // the water is not a flat fill (its ripples show up as variance).
     const sun_luma = luma(img.getPixel(width / 2 + 34, horizon - 16));
     const sky_top = luma(img.getPixel(width / 4, 3));
-    const sky_horizon = luma(img.getPixel(width / 4, horizon - 3));
+    // Sampled above the tallest ridge, so the pixel really is sky.
+    const sky_horizon = luma(img.getPixel(width / 4, horizon - 40));
 
+    // In the band the ridges occupy, the sky is already warm, so anything dark
+    // there is silhouette.
     var dark: usize = 0;
-    for (0..horizon) |y| {
+    for (horizon - 32..horizon) |y| {
         for (0..width) |x| {
-            if (luma(img.getPixel(x, y)) < 0.10) dark += 1;
+            if (luma(img.getPixel(x, y)) < 0.20) dark += 1;
         }
     }
 
@@ -245,13 +248,23 @@ fn report(out: *Io.Writer, img: Image) !void {
     const variance = sum2 / @as(f64, @floatFromInt(n)) - mean * mean;
 
     try out.print("\nsun {d:.3}, sky top {d:.3}, sky at the horizon {d:.3}\n", .{ sun_luma, sky_top, sky_horizon });
-    try out.print("dark pixels above the horizon (mountains): {d}, water variance {d:.5}\n", .{ dark, variance });
+    try out.print("ridge silhouette pixels {d}, water variance {d:.5}\n", .{ dark, variance });
     try check(out, "the sun is the brightest thing in the frame", sun_luma, sky_horizon * 2.0);
     try check(out, "the sky brightens towards the horizon", sky_horizon, sky_top * 2.0);
-    try check(out, "the mountains cover a real area", @floatFromInt(dark), 800);
+    try check(out, "the ridges cover a real area", @floatFromInt(dark), 800);
     try check(out, "the water has ripples", variance, 0.0005);
 }
 
 fn luma(c: Color) f64 {
     return @as(f64, @floatCast(0.299 * c.r + 0.587 * c.g + 0.114 * c.b));
+}
+
+/// Every claim below is a lower bound: `value` has to clear `floor`.
+fn check(out: *Io.Writer, label: []const u8, value: f64, floor: f64) !void {
+    if (!(value > floor)) {
+        try out.print("  FAIL {s}: {d} is not above {d}\n", .{ label, value, floor });
+        try out.flush();
+        return error.CheckFailed;
+    }
+    checks += 1;
 }
