@@ -70,6 +70,12 @@ jobs:
       - name: Examples
         run: zig build examples
 
+      # Runners have no GPU, so this exercises the other half of the backend
+      # contract: probing finds nothing, opening a device returns `null`, and the
+      # kernel runs on the CPU without crashing or printing a wrong number.
+      - name: Backend probe (no GPU on CI runners)
+        run: zig build run-gpu-probe
+
       - name: Benchmark smoke test
         run: zig build bench -- --quick
 
