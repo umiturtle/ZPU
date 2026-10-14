@@ -1459,15 +1459,18 @@ pub fn sliceView(x: Tensor, ranges_user: []const Range) Error!Tensor {
     const ranges = try fullRanges(x, ranges_user, &rbuf);
     if (ranges.len != x.rank()) return Error.ShapeMismatch;
     var out = x;
-    var off: usize = x.offset;
+    // Signed throughout: slicing a flipped (or otherwise negatively strided)
+    // tensor moves the offset *backwards*, so a usize accumulator would trap
+    // instead of producing the view. The result is still a valid element index.
+    var off: isize = @intCast(x.offset);
     for (0..x.rank()) |i| {
         const rr = try resolveRange(ranges[i], x.shape.dims[i]);
         out.shape.dims[i] = rr.len;
         out.strides[i] = x.strides[i] * rr.step;
-        off +|= @as(usize, @intCast(@as(isize, @intCast(rr.start)) * x.strides[i]));
+        off += @as(isize, @intCast(rr.start)) * x.strides[i];
     }
-    out.offset = off;
-    out.id = @import("tensor.zig").Tensor.viewOf(x, out.shape, out.strides, off).id;
+    out.offset = @intCast(off);
+    out.id = @import("tensor.zig").Tensor.viewOf(x, out.shape, out.strides, out.offset).id;
     return out;
 }
 
@@ -1693,8 +1696,12 @@ pub fn pad(x: Tensor, pads: []const [2]usize, value: f64) Error!Tensor {
 pub fn flip(x: Tensor, axis: i32) Error!Tensor {
     const a = try realAxis(x, axis);
     var out = x;
+    // Mirroring an axis leaves the first *logical* element at the far end of
+    // that axis. Flipping twice walks back to where it started, and flipping a
+    // already-flipped tensor therefore moves the offset backwards — signed.
     out.strides[a] = -x.strides[a];
-    out.offset = x.offset + @as(usize, @intCast(@as(isize, @intCast(x.shape.dims[a] - 1)) * x.strides[a]));
+    out.offset = @intCast(@as(isize, @intCast(x.offset)) +
+        @as(isize, @intCast(x.shape.dims[a] - 1)) * x.strides[a]);
     out.id = @import("tensor.zig").Tensor.viewOf(x, out.shape, out.strides, out.offset).id;
     return finish(.flip, &.{x}, out, .{ .axis = axis });
 }

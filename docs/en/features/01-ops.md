@@ -85,3 +85,7 @@ const v = try zpu.variance(a, -1, false);
   everything".
 * Reductions drop the axis unless `keepdims` is true; inside `vmap` the depth is
   preserved automatically.
+* A negative `step` follows NumPy: `end` stays **exclusive** and a negative `end`
+  counts from the far end, so `Range.strided(2, -1, -1)` is empty — exactly like
+  `x[2:-1:-1]` in NumPy. To walk an axis backwards, `flip` is the natural
+  spelling, and it returns a view rather than a copy.

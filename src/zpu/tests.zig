@@ -649,6 +649,45 @@ test "nn: conv2d" {
     try check(conv, &.{ 6, 8, 12, 14 }, 1e-12);
 }
 
+test "negative strides read back in logical order" {
+    try setup();
+    var scope = try zpu.Scope.init(alloc);
+    defer scope.deinit();
+
+    // `flip` is a view with a negative stride, so reading it walks backwards
+    // through the buffer. That walk has to be done in signed arithmetic: the
+    // accumulated delta is negative even though the element it selects is not.
+    const a = try arr(f64, &.{ 1, 2, 3, 4, 5, 6 }, &.{ 2, 3 });
+    const f = try zpu.flip(a, -1);
+    try check(f, &.{ 3, 2, 1, 6, 5, 4 }, 0);
+    try std.testing.expect(!f.isContiguous());
+
+    // the same walk through a slice of the view, and through toContiguous/clone
+    // (both of which copy element by element)
+    try check(try zpu.narrow(f, 0, 1, 1), &.{ 6, 5, 4 }, 0);
+    try check(try f.toContiguous(), &.{ 3, 2, 1, 6, 5, 4 }, 0);
+    try check(try f.clone(), &.{ 3, 2, 1, 6, 5, 4 }, 0);
+
+    // slicing a flipped tensor is where the offset moves backwards
+    const g = try zpu.flip(a, 1);
+    try check(try zpu.sliceRanges(g, &.{ Range.all(), Range.bounded(0, 2) }), &.{ 3, 2, 6, 5 }, 0);
+
+    // flipping twice is the identity, and a flipped matrix still multiplies:
+    // the gemm kernels walk raw memory, so both operands are materialised first
+    // and both go through the negative-stride walk
+    try check(try zpu.flip(f, -1), &.{ 1, 2, 3, 4, 5, 6 }, 0);
+    const m = try zpu.matmul(f, try zpu.transpose(f, &.{ 1, 0 }));
+    try check(m, &.{ 14, 32, 32, 77 }, 0);
+
+    // A reverse-strided range is the other way to produce negative strides.
+    // `end` is exclusive and a negative `end` counts from the far end (NumPy's
+    // rule), so "one before the first element" is spelled `-(dim + 1)`. For
+    // simply reversing an axis, `flip` says it better and costs nothing.
+    const cols: i64 = @intCast(a.shape.dims[1]);
+    const rev = try zpu.sliceRanges(a, &.{ Range.all(), Range.strided(cols - 1, -cols - 1, -1) });
+    try check(rev, &.{ 3, 2, 1, 6, 5, 4 }, 0);
+}
+
 test "reshape of a strided view owns its materialised copy" {
     // Outside a scope `releaseTemp` frees for real, so a view that forgets to
     // take a reference of its own is a use-after-free — the shape the benchmark
