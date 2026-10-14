@@ -4,9 +4,9 @@ ZPU は 2 つのライブラリを 1 つのリポジトリで育てる。
 
 | ライブラリ | 立ち位置 | 現状 |
 | --- | --- | --- |
-| `zpu` | JAX の立ち位置 — N 次元配列・自動微分・関数変換・実行計画 | 中核は動作。62 テスト green、リーク無し |
+| `zpu` | JAX の立ち位置 — N 次元配列・自動微分・関数変換・実行計画 | 中核は動作。72 テスト green、リーク無し |
 | `zgf` | 汎用グラフィックライブラリ — GPU バックエンドを `zbackend` 経由で共有 | 画像・描画・フィルタまで実装 |
-| `zbackend` | 実行バックエンド層 — CPU 実行 + WebGPU / Metal / Vulkan / DirectX 12 の検出と起動 | CPU は実行可、Vulkan / WebGPU を実装中 |
+| `zbackend` | 実行バックエンド層 — CPU 実行 + WebGPU / Metal / Vulkan / DirectX 12 の検出と起動 | CPU / Vulkan / WebGPU が実行可能（GPU 実機での確認待ち）。Metal / D3D12 は検出のみ |
 
 運用ルール:
 
@@ -78,22 +78,24 @@ ZPU は 2 つのライブラリを 1 つのリポジトリで育てる。
 * [x] `rng`: uniform / normal（再現可能なシード）
 * [x] 学習ループが実際に損失を下げるテスト
 
-## M5 — ベンチマーク基盤 (進行中)
+## M5 — ベンチマーク基盤 (完了)
 
 * [x] `bench/` に Zig のみのハーネス（`zig build bench`）
 * [x] 各カーネルのスループット（GFLOP/s、GB/s）と理論ピーク比
 * [x] `bench/baseline.txt` による回帰検出（閾値以上に落ちたら失敗）
-* [ ] NumPy / PyTorch との比較は **外部で測った数値表を取り込む**形にする
+* [x] NumPy / PyTorch との比較は **外部で測った数値表を取り込む**形にする
       （リポジトリのツールは Zig のみ。比較は「外で測った数値」として文書化）
 
-## M6 — ドキュメント生成 (進行中)
+## M6 — ドキュメント生成 (完了)
 
 * [x] 原本: `docs/*.md`（ガイド・実装意図・他ライブラリとの違い）+ ソース内 `///`
 * [x] `docs/build_docs.zig` — Python を使わない Markdown サブセット → HTML 生成器
 * [x] 機能ごとの「使い方 + 実装意図」ページ（`docs/features/*.md`）
 * [x] `zig build doc` で `zig-out/doc/` に静的 HTML（索引・目次・API 一覧）
-* [ ] **英語版と日本語版の両方**を生成する（言語切り替えつきの HTML）
+* [x] **英語版と日本語版の両方**を生成する（言語切り替えつきの HTML、
+      `zig build doc` が 36 + 34 ページを出す）
 * [ ] 生成物の視覚確認と、ソース doc コメントの抜け拾い
+* [ ] `jit` / `graph` の実装意図ページ（`docs/features/` の残り）
 
 ## M7 — バックエンド層 (進行中)
 
@@ -102,11 +104,21 @@ ZPU は 2 つのライブラリを 1 つのリポジトリで育てる。
 * [x] `Kernel` / `Source` / `Buffer` / `dispatch` の共通インターフェース
 * [x] CPU バックエンド（`dispatch` と `dispatchThreaded`、カーネル内エラーの伝播）
 * [x] Vulkan の検出（ローダ → インスタンス → 物理デバイス列挙 → 名前と API 版）
-* [ ] **Vulkan と WebGPU を実機で完全動作させる**（この順で優先）
-  * [ ] Vulkan: 論理デバイス + キュー、SSBO、compute pipeline、dispatch、読み戻し
-  * [ ] WebGPU: `wgpu-native` / Dawn の C API を dlopen、バッファと compute pass
-  * [ ] どちらも GPU が無い環境では probe が正しく「無し」を返し、テストは SKIP で green
-* [ ] Direct3D 12 / Metal（上記 2 つが完成してから）
+* [x] デバイス層: `Device`（バックエンドごとのタグ付き共用体）、`openDevice`、
+      `dispatchOn`、ロックフリーなプロセス単位キャッシュ（`device` / `shutdownDevices`）
+* [x] **Vulkan**: ローダのみを相手に、論理デバイス + 計算キュー + コマンドプール、
+      ホスト可視メモリ、SPIR-V からの compute pipeline、SSBO、push constant、
+      フェンス待ち、読み戻し（`src/backend/vulkan.zig`）
+* [x] **WebGPU**: Dawn / wgpu-native を `wgpuGetProcAddress` か直接シンボルで解決、
+      アダプタ / デバイス要求、WGSL モジュール、ストレージバッファ、bind group、
+      compute pass、`map_async` 読み戻し（`src/backend/webgpu.zig`）
+* [x] GPU が無い環境では `openDevice` が `null` を返し、`dispatch` は CPU に落ちる
+      （テストはそのまま green）
+* [ ] **GPU 実機での検証**: `zig build run-gpu-probe` が各デバイスを開いて
+      1024 要素のカーネルを実行し、数値を検査する（この開発環境は GPU 無し）
+* [ ] パイプラインのキャッシュ（今はディスパッチごとに作って壊す）
+* [ ] デバイス常駐バッファ（今は毎回ホストと往復する）
+* [ ] Direct3D 12 / Metal の実行（上記 2 つが固まってから）
 * [ ] `zgf` から `zbackend` 経由で GPU 実行する経路
 
 ## M8 — `zgf` (進行中)
@@ -119,19 +131,27 @@ ZPU は 2 つのライブラリを 1 つのリポジトリで育てる。
 * [ ] PNG のエンコード / デコード（zlib を Zig で、依存なし）
 * [ ] `zbackend` 経由の GPU 実行（同じカーネルを CPU/GPU 両方で）
 
-## M9 — CI/CD (未着手)
+## M9 — CI/CD (進行中)
 
-* [ ] GitHub Actions: Linux で `zig build check` / `test` / `doc` / `examples` / `bench --quick`
-* [ ] macOS / Windows はコンパイルのみのマトリクス（バックエンドの分岐が両方通ること）
+* [x] GitHub Actions: Linux / macOS / Windows で `zig build check` / `test` / `doc` /
+      `examples` / `bench -- --quick`（`.github/workflows/ci.yml`）、
+      `zig-out/doc` を成果物として保存
+* [x] GitHub Pages への配信（`.github/workflows/pages.yml`、`main` への push で公開）
+* [x] Zig のバージョンは 0.17.0 に固定（CI が ziglang.org から取得）
+* [ ] `build.zig.zon` の `minimum_zig_version` を 0.17.0 に合わせる
 * [ ] ベンチ結果を CI のログに残す（回帰検出は `--check` で失敗させる）
-* [ ] Zig のバージョンは 0.17.0 に固定（`build.zig.zon` の `minimum_zig_version` と一致）
+* [ ] Pages の有効化（リポジトリ設定）と、最初の green な run の確認
 
-## M10 — 仕上げ (未着手)
+## M10 — 仕上げ (進行中)
 
+* [x] README に「他ライブラリとの違い」と実測ベンチを載せる
+* [x] 調査用の実行時計測コードを残さない（一貫性の検査は comptime へ）
 * [ ] Zig 0.17 のイディオム見直し（`std.Io`、エラーセット、`@splat`、`inline for`）
 * [ ] 公開 API の doc コメント網羅（`zig build doc` の警告ゼロ）
-* [ ] README に「他ライブラリとの違い」と実測ベンチを載せる
-* [ ] `examples/` の充実（チュートリアルから写経できる形）
+* [ ] `examples/` の充実 — `build.zig` が名前を挙げている 8 本のうち
+      `gpu-probe` 以外（`tensors` / `autodiff` / `train-mlp` / `images` /
+      `vector-art` / `render3d` / `diff-render` / `serve_demo`）を書く
+* [ ] `LICENSE` ファイル（README は MIT と書いている）
 * [ ] タグ付けとリリースノート
 
 ---
