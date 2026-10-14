@@ -1,0 +1,191 @@
+# CI for ZPU / ZGF.
+#
+# The toolchain is the only thing CI installs beyond the checkout: Zig 0.17.0 is
+# downloaded from ziglang.org (checked in the same way the project does locally),
+# and every step is a `zig build` invocation. No Python, no package manager, no
+# package registry — the repository has no Zig dependencies to fetch.
+#
+# Every build step pipes its output through `tee -a ci.log` (`shell: bash` on all
+# three platforms, so one idiom works everywhere). When a step fails, the
+# "Failure details" step at the end copies the tail of that log into the job's
+# summary, which is readable through the API — a red run explains itself without
+# anyone having to open the browser.
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "arena/**"
+  pull_request:
+  workflow_dispatch:
+
+env:
+  ZIG_VERSION: 0.17.0
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }} (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64)   asset="zig-x86_64-linux-$ZIG_VERSION.tar.xz" ;;
+            Linux-aarch64)  asset="zig-aarch64-linux-$ZIG_VERSION.tar.xz" ;;
+            Darwin-arm64)   asset="zig-aarch64-macos-$ZIG_VERSION.tar.xz" ;;
+            Darwin-x86_64)  asset="zig-x86_64-macos-$ZIG_VERSION.tar.xz" ;;
+            *) echo "unsupported runner: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+          esac
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/$ZIG_VERSION/$asset"
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Install Zig ${{ env.ZIG_VERSION }} (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $asset = "zig-x86_64-windows-$env:ZIG_VERSION.zip"
+          curl.exe -fsSL -o zig.zip "https://ziglang.org/download/$env:ZIG_VERSION/$asset"
+          Expand-Archive -Path zig.zip -DestinationPath "$env:RUNNER_TEMP\zig-dl"
+          $dir = Get-ChildItem "$env:RUNNER_TEMP\zig-dl" -Directory | Select-Object -First 1
+          "$($dir.FullName)" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: zig version
+        shell: bash
+        run: zig version
+
+      - name: Formatting and tests
+        shell: bash
+        run: zig build check 2>&1 | tee -a ci.log
+
+      - name: Tests (explicit)
+        shell: bash
+        run: zig build test 2>&1 | tee -a ci.log
+
+      - name: Documentation
+        shell: bash
+        run: zig build doc 2>&1 | tee -a ci.log
+
+      - name: Examples
+        shell: bash
+        run: zig build examples 2>&1 | tee -a ci.log
+
+      # Runners have no GPU, so this exercises the other half of the backend
+      # contract: probing finds nothing, opening a device returns `null`, and the
+      # kernel runs on the CPU without crashing or printing a wrong number.
+      - name: Backend probe (no GPU on CI runners)
+        shell: bash
+        run: zig build run-gpu-probe 2>&1 | tee -a ci.log
+
+      - name: Benchmark smoke test
+        shell: bash
+        run: zig build bench -- --quick 2>&1 | tee -a ci.log
+
+      # The step summary shows up in the browser; the annotation shows up in the
+      # API (`gh api .../check-runs/<id>/annotations`), which is how a red run is
+      # read from a terminal. Write both.
+      - name: Failure details
+        if: failure()
+        shell: bash
+        run: |
+          tail_out="$(tail -60 ci.log 2>/dev/null || echo '(no log captured)')"
+          {
+            echo '### Log tail'
+            echo '```'
+            echo "$tail_out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          escaped="${tail_out//'%'/'%25'}"
+          escaped="${escaped//$'\r'/}"
+          escaped="${escaped//$'\n'/'%0A'}"
+          echo "::error title=ci.log tail::${escaped}"
+
+  # A runner with no GPU still gets to exercise the *device* path: lavapipe is a
+  # software Vulkan implementation (mesa), needs no /dev/dri, and speaks real
+  # SPIR-V. With it installed the probe must find a device, open it, dispatch the
+  # shipped kernel and check the numbers — `ZPU_REQUIRE_GPU` turns "found
+  # nothing" into a failure, so a silent regression cannot hide behind the CPU
+  # fallback.
+  gpu:
+    name: gpu (software Vulkan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Install a software Vulkan driver
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers vulkan-tools
+
+      - name: What the runner has
+        shell: bash
+        run: vulkaninfo --summary 2>&1 | tee -a gpu.log || true
+
+      - name: The kernel must run on the device
+        shell: bash
+        run: ZPU_REQUIRE_GPU=vulkan zig build run-gpu-probe 2>&1 | tee -a gpu.log
+
+      - name: And the tests still pass with a driver present
+        shell: bash
+        run: zig build test 2>&1 | tee -a gpu.log
+
+      - name: Failure details
+        if: failure()
+        shell: bash
+        run: |
+          tail_out="$(tail -60 gpu.log 2>/dev/null || echo '(no log captured)')"
+          {
+            echo '### Log tail'
+            echo '```'
+            echo "$tail_out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          escaped="${tail_out//'%'/'%25'}"
+          escaped="${escaped//$'\r'/}"
+          escaped="${escaped//$'\n'/'%0A'}"
+          echo "::error title=gpu.log tail::${escaped}"
+
+  docs:
+    name: docs artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Build the HTML reference
+        run: zig build doc
+
+      - name: Upload the generated site
+        uses: actions/upload-artifact@v4
+        with:
+          name: zpu-docs
+          path: zig-out/doc
+          if-no-files-found: error

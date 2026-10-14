@@ -1,0 +1,3 @@
+# Zig sources are formatted with LF, and the formatter check runs on every
+# platform: keep checkouts byte-identical everywhere.
+* text=auto eol=lf

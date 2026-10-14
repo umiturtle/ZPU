@@ -1,0 +1,20 @@
+.{
+    .name = .zpu,
+    .version = "0.1.0",
+    .fingerprint = 0xa977c8d1cadac206,
+    .minimum_zig_version = "0.17.0",
+    // No `.dependencies`: ZPU and ZGF are Zig and the standard library only.
+    // The Vulkan loader and the WebGPU/Metal/D3D12 runtimes are opened with
+    // `std.DynLib` at run time, so they are never build or link dependencies.
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "bench",
+        "docs",
+        "examples",
+        "README.md",
+        "MILESTONES.md",
+        "LICENSE",
+    },
+}
