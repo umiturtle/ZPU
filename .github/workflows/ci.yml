@@ -92,16 +92,24 @@ jobs:
         shell: bash
         run: zig build bench -- --quick 2>&1 | tee -a ci.log
 
+      # The step summary shows up in the browser; the annotation shows up in the
+      # API (`gh api .../check-runs/<id>/annotations`), which is how a red run is
+      # read from a terminal. Write both.
       - name: Failure details
         if: failure()
         shell: bash
         run: |
+          tail_out="$(tail -60 ci.log 2>/dev/null || echo '(no log captured)')"
           {
             echo '### Log tail'
             echo '```'
-            tail -80 ci.log 2>/dev/null || echo "(no log captured)"
+            echo "$tail_out"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          escaped="${tail_out//'%'/'%25'}"
+          escaped="${escaped//$'\r'/}"
+          escaped="${escaped//$'\n'/'%0A'}"
+          echo "::error title=ci.log tail::${escaped}"
 
   # A runner with no GPU still gets to exercise the *device* path: lavapipe is a
   # software Vulkan implementation (mesa), needs no /dev/dri, and speaks real
@@ -145,12 +153,17 @@ jobs:
         if: failure()
         shell: bash
         run: |
+          tail_out="$(tail -60 gpu.log 2>/dev/null || echo '(no log captured)')"
           {
             echo '### Log tail'
             echo '```'
-            tail -80 gpu.log 2>/dev/null || echo "(no log captured)"
+            echo "$tail_out"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          escaped="${tail_out//'%'/'%25'}"
+          escaped="${escaped//$'\r'/}"
+          escaped="${escaped//$'\n'/'%0A'}"
+          echo "::error title=gpu.log tail::${escaped}"
 
   docs:
     name: docs artifact
