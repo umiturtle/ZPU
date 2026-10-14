@@ -431,19 +431,44 @@ pub fn loadPpm(alloc: std.mem.Allocator, io: std.Io, path: []const u8) Error!Ima
     const bytes = try alloc.alloc(u8, len);
     defer alloc.free(bytes);
     _ = file.readPositionalAll(io, bytes, 0) catch return Error.IoFailed;
+    return decodePpm(alloc, bytes);
+}
 
-    // A one line header: magic, width, height, max value, then raw samples.
-    var it = std.mem.tokenizeAny(u8, bytes, " \t\r\n");
-    const magic = it.next() orelse return Error.InvalidImage;
+/// Decodes the bytes of a binary PPM/PGM file (`loadPpm` minus the filesystem).
+///
+/// The header is walked with an explicit cursor rather than a whitespace
+/// tokenizer: a tokenizer that also skips *leading* delimiters would run past
+/// the header's newline whenever the first pixel byte happens to be `\r`, `\n`,
+/// `\t` or a space — which is about one pixel in sixteen, so it is not a corner
+/// case but a coin flip. Only one whitespace byte may separate the max value
+/// from the samples, which is what `toPpm` writes.
+pub fn decodePpm(alloc: std.mem.Allocator, bytes: []const u8) Error!Image {
+    var pos: usize = 0;
+    var field: [4][]const u8 = undefined;
+    for (&field) |*f| {
+        while (pos < bytes.len and isPpmSpace(bytes[pos])) pos += 1;
+        const start = pos;
+        while (pos < bytes.len and !isPpmSpace(bytes[pos])) pos += 1;
+        if (pos == start) return Error.InvalidImage;
+        f.* = bytes[start..pos];
+    }
+    const magic = field[0];
     if (!std.mem.eql(u8, magic, "P5") and !std.mem.eql(u8, magic, "P6")) return Error.InvalidImage;
-    const w = std.fmt.parseUnsigned(usize, it.next() orelse return Error.InvalidImage, 10) catch return Error.InvalidImage;
-    const h = std.fmt.parseUnsigned(usize, it.next() orelse return Error.InvalidImage, 10) catch return Error.InvalidImage;
-    const max: usize = std.fmt.parseUnsigned(usize, it.next() orelse return Error.InvalidImage, 10) catch return Error.InvalidImage;
-    if (max != 255) return Error.InvalidImage;
+    const w = std.fmt.parseUnsigned(usize, field[1], 10) catch return Error.InvalidImage;
+    const h = std.fmt.parseUnsigned(usize, field[2], 10) catch return Error.InvalidImage;
+    const max = std.fmt.parseUnsigned(usize, field[3], 10) catch return Error.InvalidImage;
+    if (max != 255 or w == 0 or h == 0) return Error.InvalidImage;
+
+    if (pos >= bytes.len or !isPpmSpace(bytes[pos])) return Error.InvalidImage;
+    pos += 1;
     const channels: usize = if (magic[1] == '5') 1 else 3;
-    const header_len = @intFromPtr(it.rest().ptr) - @intFromPtr(bytes.ptr);
-    if (bytes.len < header_len + w * h * channels) return Error.InvalidImage;
-    return Image.fromPixels(alloc, w, h, channels, bytes[header_len..]);
+    const need = w * h * channels;
+    if (bytes.len < pos + need) return Error.InvalidImage;
+    return Image.fromPixels(alloc, w, h, channels, bytes[pos .. pos + need]);
+}
+
+fn isPpmSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\r' or c == '\n';
 }
 
 test "image basics" {
@@ -498,6 +523,40 @@ test "ppm bytes are a valid P6 file" {
     try std.testing.expectEqual(@as(usize, 11 + 6), ppm.len);
     try std.testing.expectEqual(@as(u8, 255), ppm[11]);
     try std.testing.expectEqual(@as(u8, 0), ppm[16]);
+}
+
+test "ppm decodes back into the image it came from" {
+    const alloc = std.testing.allocator;
+    try zpu.init(alloc, .{});
+    var scope = try zpu.Scope.init(alloc);
+    defer scope.deinit();
+
+    // One of the pixels is chosen so that its first byte is 0x0d (`\r`): a
+    // header parser that tokenizes on whitespace runs past the header's newline
+    // on exactly this input. Every default-filled image is like this, because
+    // the background bytes are small integers.
+    var img = try Image.init(alloc, 3, 2, 3);
+    defer img.deinit();
+    img.fill(.{ .r = 13.0 / 255.0, .g = 10.0 / 255.0, .b = 32.0 / 255.0 });
+    img.setPixel(1, 1, .{ .r = 1, .g = 0.5, .b = 0.25 });
+
+    const ppm = try img.toPpm(alloc);
+    defer alloc.free(ppm);
+    var back = try decodePpm(alloc, ppm);
+    defer back.deinit();
+    try std.testing.expectEqual(img.width(), back.width());
+    try std.testing.expectEqual(img.height(), back.height());
+    try std.testing.expectEqual(img.channels(), back.channels());
+    for (0..img.numel()) |i| {
+        // 8-bit rounding is the only loss allowed on the way through
+        try std.testing.expectApproxEqAbs(img.pixels.readF64(i), back.pixels.readF64(i), 1.0 / 255.0);
+    }
+
+    // A colour image written as P6 with a mono body must be rejected, not
+    // silently reinterpreted.
+    try std.testing.expectError(Error.InvalidImage, decodePpm(alloc, "P6\n3 2\n255\n\x00\x01"));
+    try std.testing.expectError(Error.InvalidImage, decodePpm(alloc, "P3\n3 2\n255\n0 0 0"));
+    try std.testing.expectError(Error.InvalidImage, decodePpm(alloc, "P5\n0 2\n255\n"));
 }
 
 test "filters behave" {
