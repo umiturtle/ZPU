@@ -39,7 +39,9 @@ const kernel = zb.Kernel{
         ,
         .msl = ..., .glsl = ..., .hlsl = ...,
     },
-    .spirv = null, // Vulkan needs SPIR-V (see "Notes")
+    // Vulkan needs SPIR-V. The shipped bytecode comes with the repository
+    // (its provenance is recorded in `src/backend/spirv.zig`).
+    .spirv = &zb.spirv.scale_offset,
 };
 
 // 3. run it: without a GPU the Zig body runs on the CPU
@@ -48,7 +50,12 @@ var ctx = zb.KernelCtx{ .buffers = &buffers, .count = data.len, .threads = 64, .
 try zb.dispatch(.cpu, kernel, &ctx);              // serial
 try zb.dispatchThreaded(.cpu, kernel, &ctx, 8);   // split over 8 threads
 
-// 4. or hold a device yourself (opening one costs milliseconds)
+// 4. let the environment pick the driver (optional): ZPU_VULKAN_LIB /
+//    ZPU_WEBGPU_LIB name one library, VK_ICD_FILENAMES / VK_DRIVER_FILES are
+//    read as further candidates.
+zb.configureFromEnvironment(init.environ_map);
+
+// 5. or hold a device yourself (opening one costs milliseconds)
 if (try zb.openDevice(.vulkan)) |dev| {
     var device = dev;
     defer device.deinit();
@@ -56,12 +63,14 @@ if (try zb.openDevice(.vulkan)) |dev| {
 }
 ```
 
-`zig build run-gpu-probe` prints the table above, lowers the same kernel into four
+`zig build run-gpu-probe` prints the table above, lowers the same kernel into five
 shading languages and checks threaded CPU dispatch against the serial result. It
-then **opens each backend's device for real**, and on a backend whose kernel has
-code for it, runs the kernel and checks the numbers. On a machine without a GPU
-it prints "not available" for all four and only the CPU runs — that is not a
-failure, it is the correct answer for that machine.
+then **opens each backend's device for real** and, on a backend whose kernel has
+code for it, runs the kernel and checks the numbers — a single wrong number fails
+the run. On a machine without a GPU it prints "not available" and only the CPU
+runs, which is not a failure but the correct answer for that machine. When at
+least one device ran, it also reports the cost of the first dispatch (the
+pipeline is built there) and the average of the ones after it.
 
 ## Implementation intent
 
@@ -112,15 +121,48 @@ failure, it is the correct answer for that machine.
   thread open it. A thread that loses the race does not wait: it runs that
   dispatch on the CPU. A correct answer now beats a few milliseconds of waiting.
 
-* **Vulkan talks to the loader only.** No headers, no SDK, no link-time
+* **Vulkan follows the API's own stages.** No headers, no SDK, no link-time
   dependency: the ABI structs (`VkInstanceCreateInfo`, ...) are declared in this
-  repository and every entry point is resolved by name through
-  `vkGetInstanceProcAddr`. Once the device exists we look for a compute queue
-  family and host-visible coherent memory, and buffers stay mapped for their
-  lifetime (upload and readback are `memcpy`s). Each dispatch creates and
-  destroys a shader module, descriptor set layout, pipeline, descriptor set,
-  command buffer and fence. `count` and `threads` travel as a 16-byte push
-  constant, `{ u32 count; u32 threads; u32 pad[2]; }`.
+  repository and entry points are resolved by name. The staging is not a
+  formality: with a null instance `vkGetInstanceProcAddr` is only obliged to
+  return the global commands (`vkCreateInstance` and friends) — measured against
+  SwiftShader, everything else came back NULL. So (1) opening the library
+  resolves the globals, (2) `createInstance` resolves the instance-level
+  commands on the instance it just made (`Loader.resolveWith`), and (3)
+  device-level commands come from `vkGetDeviceProcAddr`, the API's fast path
+  where the loader hands back a direct pointer instead of a trampoline.
+  `probe()` walks the same steps, reads the API version and the device names,
+  and always destroys what it made. Once the device exists we look for a compute
+  queue family and host-visible coherent memory, and buffers stay mapped for
+  their lifetime (upload and readback are `memcpy`s). `count` and `threads`
+  travel as a 16-byte push constant, `{ u32 count; u32 threads; u32 pad[2]; }`.
+
+* **Pipelines are not rebuilt.** Creating a shader module, descriptor set
+  layout, descriptor set, pipeline, command buffer and fence per dispatch used to
+  include compiling the shader, and that dominated everything else. Now the
+  device keeps them, keyed by the SPIR-V hash and the binding count (four fixed
+  slots; a different kernel hashing to a slot recycles it), and one command
+  buffer plus one fence are reset instead of reallocated. What changes per
+  dispatch is the descriptor contents. Measured here (SwiftShader, 1024
+  invocations, 200 dispatches): 1975–2160 µs per dispatch without the cache,
+  60–85 µs with it.
+
+* **The workgroup size comes from the module.** `@workgroup_size` is baked into
+  the bytecode, so trusting the caller's `threads` would leave invocations
+  unrun. `spirv.localSize()` reads `OpExecutionMode LocalSize`, and that value
+  decides the workgroup count and what the push constant carries.
+
+* **Drivers are found by name, and can be named.** Besides the per-platform
+  names (`libvulkan.so.1`, `vulkan-1.dll`, `libMoltenVK.dylib`, ...), Linux also
+  searches the multiarch directory and the software rasterizers (SwiftShader,
+  lavapipe). `setDriverLibrary` / `ZPU_VULKAN_LIB` / `ZPU_WEBGPU_LIB` point at one
+  library, `VK_ICD_FILENAMES` / `VK_DRIVER_FILES` are read as further candidates,
+  and `null` restores the defaults. An ICD works as well as a loader: a Vulkan
+  driver exports `vkGetInstanceProcAddr` itself. In a Linux program that does not
+  link libc only the loader's names are tried — Zig's built-in ELF loader does
+  not run a library's constructors, so a driver written in C++ (SwiftShader, for
+  instance) would never be initialised. Ordinary GPU programs link libc, and then
+  the platform loader takes care of bringing the ICD up.
 
 * **WebGPU follows the `webgpu.h` conventions.** To work with Dawn
   (`wgpuGetProcAddress`) and with implementations that export plain symbols
@@ -143,7 +185,7 @@ failure, it is the correct answer for that machine.
 | Backend | Detection | Execution |
 | --- | --- | --- |
 | CPU | always | `dispatch` / `dispatchThreaded` / `dispatchOn` |
-| Vulkan | loader + instance + physical device enumeration | **done**: device, compute queue, command pool, host-visible memory, SPIR-V pipeline, SSBOs, push constants, fence |
+| Vulkan | loader + instance + physical device enumeration (API version and device names) | **done, verified on a real device**: device, compute queue, command pool, host-visible memory, cached SPIR-V pipelines, SSBOs, push constants, fence |
 | WebGPU | loading the implementation (Dawn / wgpu-native) | **done**: adapter request, device request, WGSL module, storage buffers, bind group, compute pass, readback |
 | Metal | `MTLCreateSystemDefaultDevice` | planned |
 | Direct3D 12 | `D3D12CreateDevice` | planned |
@@ -151,14 +193,19 @@ failure, it is the correct answer for that machine.
 Vulkan and WebGPU come first; the other two keep their detection code and their
 seat in `Backend.ALL`.
 
-**What is verified where.** This development machine has no GPU (no `libvulkan`,
-no Dawn, no `/dev/dri`), so the GPU paths themselves are checked on real hardware
-by running `zig build run-gpu-probe`, which opens each backend's device, runs the
-kernel on the backends that have code for it and checks the numbers. Without a
-GPU the verifiable parts are: (1) loader probing and instance creation,
-(2) ABI struct layouts (comptime tests pin sizes and offsets), (3) completeness of
-the entry-point table (comptime), (4) returning `null` and falling back to the CPU
-when a backend cannot run, and (5) CPU execution equivalence.
+**What is verified where.** This development machine has neither a GPU nor
+`/dev/dri`, so the Vulkan path runs against a software driver:
+`ZPU_VULKAN_LIB=/path/to/libvk_swiftshader.so zig build run-gpu-probe` opens the
+device, runs the shipped SPIR-V, checks the numbers and measures the 60–85 µs per
+dispatch quoted above. On a machine with a GPU, plain `zig build run-gpu-probe`
+performs the same checks, because the loader and the ICD are already there. The
+tests follow the same rule: where `probe()` finds a driver they **must** open the
+device, run the kernel and match the numbers, and they only fall back to the CPU
+equivalence checks where it does not. What can be checked without hardware:
+(1) loader discovery and staged resolution, (2) ABI struct layouts (comptime
+tests pin sizes and offsets), (3) completeness of the entry-point table
+(comptime), (4) returning `null` and falling back to the CPU when a backend
+cannot run, and (5) CPU execution equivalence.
 
 ## Notes
 
@@ -179,17 +226,12 @@ when a backend cannot run, and (5) CPU execution equivalence.
 * **Do not use uniforms.** Even a small constant goes into a storage buffer
   (`var<storage, read> scale: array<f32>;`), because the backends describe every
   buffer as a storage buffer.
-* **The GPU path copies buffers on every dispatch.** Each call allocates,
-  uploads, dispatches and frees device memory, so a hot loop should hold its own
-  device with `dispatchOn` and resident buffers (device-resident tensors are the
-  next step).
+* **The GPU path copies buffers on every dispatch.** Each call allocates device
+  memory, uploads from the host, runs and reads back. The pipeline, the
+  descriptors and the command buffer are cached, so what remains is that round
+  trip plus submit and fence. Device-resident buffers (`DeviceBuffer`) are the
+  next step; until then a hot loop is best served by calling `dispatchOn`
+  directly.
 * Close a device with `Device.deinit` (the value `openDevice` handed out) or
   `zpu.shutdownDevices()` (the process-wide cache) — never while a dispatch is
   running.
-
-* `Backend.ALL` lists all five backends in a stable order, so a UI or a log line
-  can iterate it without special cases.
-* The probe result is cached in the per-thread context and dropped by
-  `zpu.deinit()`, so `zpu.backends()` is free to call in a loop.
-* Kernel sources are plain strings: a host that has no idea what WGSL is can
-  still hand a kernel to a backend that does.

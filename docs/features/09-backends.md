@@ -39,16 +39,23 @@ const kernel = zb.Kernel{
         ,
         .msl = ..., .glsl = ..., .hlsl = ...,
     },
-    .spirv = null, // Vulkan は SPIR-V が要る（下の「注意」を参照）
+    // Vulkan は SPIR-V が要る。同梱のバイトコードを使う（出所は
+    // `src/backend/spirv.zig` に書いてある）。
+    .spirv = &zb.spirv.scale_offset,
 };
 
-// 3. 実行する。GPU が無ければ CPU の Zig 本体が走る
+// 3. 使うドライバを環境から決める（省略可）
+//    ZPU_VULKAN_LIB / ZPU_WEBGPU_LIB で 1 つのライブラリを指定でき、
+//    VK_ICD_FILENAMES / VK_DRIVER_FILES も候補として読む。
+zb.configureFromEnvironment(init.environ_map);
+
+// 4. 実行する。GPU が無ければ CPU の Zig 本体が走る
 var buffers = [_]zb.Buffer{.{ .ptr = @ptrCast(data.ptr), .len = data.len * @sizeOf(f32) }};
 var ctx = zb.KernelCtx{ .buffers = &buffers, .count = data.len, .threads = 64, .alloc = alloc };
 try zb.dispatch(.cpu, kernel, &ctx);              // 逐次
 try zb.dispatchThreaded(.cpu, kernel, &ctx, 8);   // 8 スレッドに分割
 
-// 4. デバイスを自分で持つこともできる（毎回開かないので速い）
+// 5. デバイスを自分で持つこともできる（毎回開かないので速い）
 if (try zb.openDevice(.vulkan)) |dev| {
     var device = dev;
     defer device.deinit();
@@ -56,11 +63,13 @@ if (try zb.openDevice(.vulkan)) |dev| {
 }
 ```
 
-`zig build run-gpu-probe` は上の表を出力し、同じカーネルを 4 つのシェーディング
+`zig build run-gpu-probe` は上の表を出力し、同じカーネルを 5 つのシェーディング
 言語に落とし、CPU のスレッド実行をシリアル実行と突き合わせて検証する。さらに
 各バックエンドの**デバイスを実際に開いて**、そのカーネルのコードを持っている
-バックエンドでは実行して数値を検査する（GPU の無いマシンでは「not available」と
-表示され、CPU だけが実行する — これは失敗ではなく、そのマシンの正しい答え）。
+バックエンドで実行して数値を検査し、結果が 1 つでも違えば非ゼロで終わる
+（GPU の無いマシンでは「not available」と表示され、CPU だけが実行する —
+これは失敗ではなく、そのマシンの正しい答え）。デバイスが 1 つでも動いたときは、
+最初のディスパッチ（パイプライン生成を含む）と、それ以降の平均を表示する。
 
 ## 実装意図
 
@@ -108,15 +117,49 @@ if (try zb.openDevice(.vulkan)) |dev| {
   1 スレッドだけが開く。負けたスレッドは待たずにその回のディスパッチを CPU で
   実行する — 数ミリ秒待つより、正しい答えを今返すほうが良い。
 
-* **Vulkan はローダだけを相手にする。** ヘッダも SDK もリンク時依存も無し。
+* **Vulkan は API の段階どおりに解決する。** ヘッダも SDK もリンク時依存も無し。
   `VkInstanceCreateInfo` などの ABI 構造体をこのリポジトリ内で宣言し、
-  `vkGetInstanceProcAddr` から全エントリポイントを名前で解決する。
-  デバイスを作ったら、計算用のキュー族を探し、ホスト可視でコヒーレントな
+  エントリポイントは名前で解決する。ここで効くのが Vulkan の段階性で、
+  `vkGetInstanceProcAddr` は instance が無いときに global コマンド
+  （`vkCreateInstance` など）しか返す義務が無い（SwiftShader で実測: 他は全て
+  NULL だった）。だから (1) ライブラリを開いた時点で global を解決し、
+  (2) instance を作った直後に instance レベルのコマンドを解決し
+  （`Loader.resolveWith`）、(3) デバイスレベルのコマンドは
+  `vkGetDeviceProcAddr` から取る — ローダが trampoline ではなく直接のポインタを
+  返してくれる API の速い経路。`probe()` も同じ手順で instance を作り、
+  API バージョンとデバイス名を読み、必ず破棄する。
+  デバイスを作ったら計算用のキュー族を探し、ホスト可視でコヒーレントな
   メモリ種を選び、バッファは**生成時にマップしたまま**持つ（アップロードも
-  読み戻しも `memcpy`）。ディスパッチごとにシェーダモジュール・記述子
-  セットレイアウト・パイプライン・記述子セット・コマンドバッファ・フェンスを
-  作っては壊す。`count` と `threads` は push constant（16 バイト、
+  読み戻しも `memcpy`）。`count` と `threads` は push constant（16 バイト、
   `{ u32 count; u32 threads; u32 pad[2]; }`）で渡す。
+
+* **パイプラインは作り直さない。** 以前はディスパッチごとにシェーダモジュール・
+  記述子セットレイアウト・パイプライン・記述子セット・コマンドバッファ・
+  フェンスを作っては壊していた — シェーダのコンパイルを含むので、これが
+  いちばん高い部分だった。今は「SPIR-V のハッシュ + バッファ数」をキーに、
+  それらを `Device` が持ち続ける（4 本の固定スロット、別のカーネルが
+  同じスロットに来たら古い方を壊して再利用）。コマンドバッファとフェンスも
+  1 本を reset して回す。ディスパッチごとに変わるのは記述子の中身だけ。
+  この環境（SwiftShader、1024 呼び出し、200 回）での実測:
+  キャッシュ無し 1975–2160 µs/回 → キャッシュ有り 60–85 µs/回。
+
+* **workgroup サイズはモジュールから読む。** `@workgroup_size` はバイトコードに
+  焼き込まれているので、呼び出し側の `threads` を信じると取りこぼしが出る。
+  `spirv.localSize()` が `OpExecutionMode LocalSize` を読み、その値で
+  ワークグループ数を決め、push constant にも書く。
+
+* **ドライバは名前で探し、明示も出来る。** プラットフォームごとの名前
+  （`libvulkan.so.1`、`vulkan-1.dll`、`libMoltenVK.dylib` …）に加えて、Linux では
+  multiarch ディレクトリとソフトウェア実装（SwiftShader / lavapipe）も探す。
+  `setDriverLibrary` / `ZPU_VULKAN_LIB` / `ZPU_WEBGPU_LIB` で 1 つのライブラリを
+  指定でき、`VK_ICD_FILENAMES` / `VK_DRIVER_FILES` も候補として読み、しかも
+  `null` に戻せば既定に戻る。ICD を直接ロードしても動く（Vulkan ドライバは
+  自分で `vkGetInstanceProcAddr` を公開している）。
+  ただし libc をリンクしない Linux プログラムではローダの名前だけを試す:
+  Zig の組み込み ELF ローダはライブラリのコンストラクタを実行しないので、
+  C++ で書かれたドライバ（SwiftShader など）はそこで初期化されないため。
+  通常の GPU プログラムは libc をリンクしており、その場合はプラットフォームの
+  ローダが ICD の起動まで全部面倒を見る。
 
 * **WebGPU は `webgpu.h` の流儀に合わせる。** Dawn の `wgpuGetProcAddress`
   でも、wgpu-native のようにシンボルを直接公開する実装でも動くように、
@@ -139,7 +182,7 @@ if (try zb.openDevice(.vulkan)) |dev| {
 | バックエンド | 検出 | 実行 |
 | --- | --- | --- |
 | CPU | 常に | `dispatch` / `dispatchThreaded` / `dispatchOn` |
-| Vulkan | ローダ + インスタンス + 物理デバイス列挙 | **実装済み**: デバイス・計算キュー・コマンドプール、ホスト可視メモリ、SPIR-V パイプライン、SSBO、push constant、フェンス待ち |
+| Vulkan | ローダ + インスタンス + 物理デバイス列挙（API 版・デバイス名まで） | **実装済み・実デバイスで検証済み**: デバイス・計算キュー・コマンドプール、ホスト可視メモリ、SPIR-V パイプライン（キャッシュ）、SSBO、push constant、フェンス待ち |
 | WebGPU | 実装のロード（Dawn / wgpu-native） | **実装済み**: アダプタ要求、デバイス要求、WGSL モジュール、ストレージバッファ、bind group、compute pass、読み戻し |
 | Metal | `MTLCreateSystemDefaultDevice` | 予定 |
 | Direct3D 12 | `D3D12CreateDevice` | 予定 |
@@ -147,14 +190,18 @@ if (try zb.openDevice(.vulkan)) |dev| {
 Vulkan と WebGPU を先に完成させる。残り 2 つは検出コードと `Backend.ALL` の席を
 保ったまま待つ。
 
-**どこで何を検証しているか。** この開発環境には GPU が無い（`libvulkan` も
-Dawn も無く、`/dev/dri` も無い）。だから GPU 経路そのものは実機で
-`zig build run-gpu-probe` を走らせて確かめる — このコマンドは各バックエンドの
-デバイスを開き、カーネルのコードを持っているバックエンドで実行して数値を検査する。
-GPU が無い環境で検証できるのは、(1) ローダ探索とインスタンス作成の成否、
-(2) ABI 構造体のレイアウト（comptime のテストでサイズとオフセットを固定）、
-(3) エントリポイント表の網羅性（comptime）、(4) 実行できないときに
-`null` を返し CPU に落ちること、(5) CPU 実行の同値性、の 5 つ。
+**どこで何を検証しているか。** この開発環境には GPU も `/dev/dri` も無いので、
+ソフトウェア Vulkan（SwiftShader）を入れて実際のデバイス経路を通している。
+`ZPU_VULKAN_LIB=/path/to/libvk_swiftshader.so zig build run-gpu-probe` が
+デバイスを開き、同梱の SPIR-V を実行し、数値を検査して、上の 60–85 µs/回を
+その場で測る。GPU のあるマシンでは `zig build run-gpu-probe` だけで同じ検査が
+できる（ローダも ICD も既にあるため）。テストも同じ方針で、
+`probe()` がドライバを見つけた環境では**必ず**デバイスを開いてカーネルを実行し、
+数値が違えば失敗する（見つからない環境では CPU の同値検査だけを行う）。
+ハードウェアが無くても検証できるのは、(1) ローダ探索と段階解決、
+(2) ABI 構造体のレイアウト（comptime でサイズとオフセットを固定）、
+(3) エントリポイント表の網羅性（comptime）、(4) 実行できないときに `null` を
+返して CPU に落ちること、(5) CPU 実行の同値性、の 5 つ。
 
 ## 注意
 
@@ -173,13 +220,9 @@ GPU が無い環境で検証できるのは、(1) ローダ探索とインスタ
   （`var<storage, read> scale: array<f32>;` のように）。バックエンドが全
   バッファを storage として記述子に書くためで、混ぜるとレイアウト不一致になる。
 * **GPU 経路はバッファを毎回往復させる。** ディスパッチ 1 回ごとにデバイス
-  メモリを確保・転送・解放するので、ホットループでは `dispatchOn` と常駐
-  バッファを自分で持つこと（デバイス常駐テンソルは次の段階）。
+  メモリを確保し、ホストから書き、実行し、読み戻して解放する。パイプラインも
+  記述子もコマンドバッファもキャッシュ済みなので、残っているコストはこの往復と
+  submit / fence だけ。デバイス常駐バッファ（`DeviceBuffer`）は次の段階で、
+  それまではホットループで `dispatchOn` を直接使うのが最短。
 * デバイスを閉じるのは `Device.deinit`（`openDevice` が返した値）か
   `zpu.shutdownDevices()`（プロセス内キャッシュ）。ディスパッチ中に閉じない。
-
-* `Backend.ALL` は 5 つを固定順で並べるので、UI やログは例外分岐なしで回せる。
-* 探索結果はスレッドごとのコンテキストにキャッシュされ、`zpu.deinit()` で捨てる。
-  だから `zpu.backends()` はループの中で呼んでも安い。
-* カーネルのソースはただの文字列。WGSL を知らないホストでも、
-  知っているバックエンドに渡せる。

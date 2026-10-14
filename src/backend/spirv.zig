@@ -29,6 +29,28 @@ pub const scale_offset_glsl =
     \\}
 ;
 
+/// The workgroup size the module declares itself (`OpExecutionMode LocalSize`),
+/// or `null` when it does not say.
+///
+/// The size is baked into the code, so a caller that passes a different
+/// `threads` value would silently leave invocations unrun. Reading it back lets
+/// the dispatcher use what the shader actually has.
+pub fn localSize(code: []const u32) ?[3]u32 {
+    if (code.len < 6) return null;
+    var i: usize = 5; // past magic, version, generator, bound, schema
+    while (i < code.len) {
+        const word_count: usize = code[i] >> 16;
+        const opcode = code[i] & 0xffff;
+        if (word_count == 0) return null;
+        // 16 = OpExecutionMode, 17 = LocalSize, then three literal sizes.
+        if (opcode == 16 and word_count >= 6 and code[i + 2] == 17) {
+            return .{ code[i + 3], code[i + 4], code[i + 5] };
+        }
+        i += word_count;
+    }
+    return null;
+}
+
 /// The same kernel in WGSL, for the WebGPU backend. The entry point is `main`
 /// on every backend (that is the name `zbackend.entry_point` passes to the
 /// driver), and only `{threads}` is substituted.
@@ -112,6 +134,13 @@ test "the sources describe the same computation" {
     try std.testing.expect(std.mem.indexOf(u8, scale_offset_wgsl, "workgroup_size({threads})") != null);
     try std.testing.expect(std.mem.indexOf(u8, scale_offset_wgsl, "fn main(") != null);
     try std.testing.expect(std.mem.indexOf(u8, scale_offset_glsl, "void main()") != null);
+
+    // The dispatcher asks the module what workgroup size it was built with
+    // instead of trusting the number in the kernel struct.
+    try std.testing.expectEqual([3]u32{ 64, 1, 1 }, localSize(&scale_offset).?);
+    try std.testing.expectEqual(@as(?[3]u32, null), localSize(&.{ 0x07230203, 0x00010000, 0, 1, 0 }));
+    // A malformed word count must not walk off the end.
+    try std.testing.expectEqual(@as(?[3]u32, null), localSize(&.{ 0x07230203, 0x00010000, 0, 1, 0, 0xffff0000 }));
     try std.testing.expect(std.mem.indexOf(u8, scale_offset_glsl, "scale[0]") != null);
     try std.testing.expect(std.mem.indexOf(u8, scale_offset_wgsl, "scale[0]") != null);
 }

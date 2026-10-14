@@ -283,7 +283,9 @@ fn probeBackend(backend: Backend) Info {
 /// does. This copies the fixed-size result into an `Info`.
 fn vulkanInfo() Info {
     if (driverOverride(.vulkan)) |path| return vulkanInfoFrom(path) orelse .{};
-    for (libraryNames(.vulkan)) |name| {
+    // The same list the device loader walks, so the report and the device agree
+    // on what "available" means.
+    for (vulkan.libraryNames()) |name| {
         if (vulkanInfoFrom(name)) |info| return info;
     }
     return .{};

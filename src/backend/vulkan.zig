@@ -62,13 +62,11 @@ fn linuxLibraryNames() []const []const u8 {
     // what `examples/gpu_probe.zig` does — gets the full list, because then the
     // platform loader resolves the driver and runs its constructors.
     if (!builtin.link_libc) {
-        const dir = comptime multiarchDir() orelse return &.{ "libvulkan.so.1", "libvulkan.so" };
-        return &.{
-            "libvulkan.so.1",
-            "libvulkan.so",
-            "/usr/lib/" ++ dir ++ "/libvulkan.so.1",
-            "/usr/lib/" ++ dir ++ "/libvulkan.so",
-        };
+        // Only the names Zig's own loader searches (/lib, /lib64, /usr/lib,
+        // /usr/lib64); the multiarch spelling and the drivers themselves are
+        // for the platform loader, or for a program that names one explicitly
+        // (`zbackend.setDriverLibrary`, `ZPU_VULKAN_LIB`).
+        return &.{ "libvulkan.so.1", "libvulkan.so" };
     }
     const dir = comptime multiarchDir() orelse
         return &.{ "libvulkan.so.1", "libvulkan.so", "libvk_swiftshader.so", "libvulkan_lvp.so" };
@@ -401,6 +399,8 @@ pub const PushParams = extern struct {
     pad: [2]u32 = @splat(0),
 };
 
+const spirv_mod = @import("spirv.zig");
+
 // ----------------------------------------------------------------- the loader
 
 /// Function pointers resolved by name.
@@ -626,6 +626,17 @@ pub const Device = struct {
     memory_type: u32,
     props: PhysicalDeviceProperties,
 
+    /// Compiled pipelines. Creating one makes the driver compile the shader,
+    /// which dwarfs the cost of the dispatch itself, so they are kept:
+    /// `pipelineOf` hands out the same one for the same bytecode and binding
+    /// count, and reuses a slot (destroying what was there) when a new kernel
+    /// hashes to it. Nothing is in flight when this happens — `dispatchCompute`
+    /// waits for its fence before returning.
+    pipelines: [max_pipelines]?Pipeline = @splat(null),
+    /// One command buffer and one fence, reset instead of reallocated.
+    cmd: VkCommandBuffer = undefined,
+    fence: VkFence = undefined,
+
     // device level entry points
     destroy_device: *const fn (VkDevice, ?*const anyopaque) callconv(VKAPI) void,
     get_device_queue: *const fn (VkDevice, u32, u32, *VkQueue) callconv(VKAPI) void,
@@ -662,6 +673,7 @@ pub const Device = struct {
     cmd_push_constants: *const fn (VkCommandBuffer, VkPipelineLayout, u32, u32, u32, *const anyopaque) callconv(VKAPI) void,
     cmd_dispatch: *const fn (VkCommandBuffer, u32, u32, u32) callconv(VKAPI) void,
     create_fence: *const fn (VkDevice, *const FenceCreateInfo, ?*const anyopaque, *VkFence) callconv(VKAPI) i32,
+    reset_fences: *const fn (VkDevice, u32, [*]const VkFence) callconv(VKAPI) i32 = undefined,
     destroy_fence: *const fn (VkDevice, VkFence, ?*const anyopaque) callconv(VKAPI) void,
     wait_for_fences: *const fn (VkDevice, u32, [*]const VkFence, u32, u64) callconv(VKAPI) i32,
     queue_submit: *const fn (VkQueue, u32, [*]const SubmitInfo, VkFence) callconv(VKAPI) i32,
@@ -738,6 +750,9 @@ pub const Device = struct {
             .queue_family = queue_family,
             .memory_type = memory_type,
             .props = props,
+            .pipelines = @splat(null),
+            .cmd = undefined,
+            .fence = undefined,
 
             .destroy_device = try loadDeviceFn(&loader, device, @TypeOf(@as(Device, undefined).destroy_device), "vkDestroyDevice"),
             .get_device_queue = try loadDeviceFn(&loader, device, @TypeOf(@as(Device, undefined).get_device_queue), "vkGetDeviceQueue"),
@@ -774,6 +789,7 @@ pub const Device = struct {
             .cmd_push_constants = try loadDeviceFn(&loader, device, @TypeOf(@as(Device, undefined).cmd_push_constants), "vkCmdPushConstants"),
             .cmd_dispatch = try loadDeviceFn(&loader, device, @TypeOf(@as(Device, undefined).cmd_dispatch), "vkCmdDispatch"),
             .create_fence = try loadDeviceFn(&loader, device, @TypeOf(@as(Device, undefined).create_fence), "vkCreateFence"),
+            .reset_fences = try loadDeviceFn(&loader, device, @TypeOf(@as(Device, undefined).reset_fences), "vkResetFences"),
             .destroy_fence = try loadDeviceFn(&loader, device, @TypeOf(@as(Device, undefined).destroy_fence), "vkDestroyFence"),
             .wait_for_fences = try loadDeviceFn(&loader, device, @TypeOf(@as(Device, undefined).wait_for_fences), "vkWaitForFences"),
             .queue_submit = try loadDeviceFn(&loader, device, @TypeOf(@as(Device, undefined).queue_submit), "vkQueueSubmit"),
@@ -782,6 +798,14 @@ pub const Device = struct {
 
         const pool_info = CommandPoolCreateInfo{ .queue_family_index = queue_family };
         if (self.create_command_pool(device, &pool_info, null, &self.command_pool) != VK_SUCCESS) {
+            return Error.VulkanFailed;
+        }
+        const cb_info = CommandBufferAllocateInfo{ .command_pool = self.command_pool };
+        if (self.allocate_command_buffers(device, &cb_info, @ptrCast(&self.cmd)) != VK_SUCCESS) {
+            return Error.VulkanFailed;
+        }
+        const fence_info = FenceCreateInfo{};
+        if (self.create_fence(device, &fence_info, null, &self.fence) != VK_SUCCESS) {
             return Error.VulkanFailed;
         }
         return self;
@@ -833,6 +857,11 @@ pub const Device = struct {
 
     pub fn deinit(self: *Device) void {
         _ = self.device_wait_idle(self.handle);
+        for (&self.pipelines) |*slot| {
+            if (slot.*) |*p| self.destroyCached(p);
+        }
+        self.destroy_fence(self.handle, self.fence, null);
+        self.free_command_buffers(self.handle, self.command_pool, 1, @ptrCast(&self.cmd));
         self.destroy_command_pool(self.handle, self.command_pool, null);
         self.destroy_device(self.handle, null);
         self.loader.destroy_instance(self.instance, null);
@@ -907,36 +936,72 @@ pub const Device = struct {
     /// Glue for `zbackend.KernelCtx`: runs `spirv` over the contexts' buffers.
     ///
     /// `bindings[i]` must be a persistent allocation created by `allocBuffer`.
-    pub fn dispatchCompute(
-        self: *Device,
-        spirv: []const u32,
-        buffers: []const BufferBinding,
-        count: usize,
-        threads: u32,
-    ) Error!void {
-        if (spirv.len < 5) return Error.VulkanFailed;
-        const locals = @max(threads, 1);
-        const workgroups: u32 = @intCast((count + locals - 1) / locals);
-        const binding_count: u32 = @intCast(buffers.len);
+    /// The most pipelines a device keeps compiled. Four is enough for the
+    /// kernels a program dispatches in a loop; a fifth kernel recycles a slot.
+    pub const max_pipelines = 4;
 
-        // shader module
+    /// A compiled compute pipeline: the shader module, the descriptor set
+    /// layout, pool and set, the pipeline layout and the pipeline, plus the
+    /// descriptor write arrays sized for its bindings.
+    ///
+    /// All of it depends only on the bytecode and the number of buffers, so a
+    /// dispatch with different buffers rewrites the descriptors instead of
+    /// compiling anything.
+    pub const Pipeline = struct {
+        key: u64,
+        bindings: u32,
+        module: VkShaderModule,
+        set_layout: VkDescriptorSetLayout,
+        layout: VkPipelineLayout,
+        pipeline: VkPipeline,
+        pool: VkDescriptorPool,
+        set: VkDescriptorSet,
+        infos: []DescriptorBufferInfo,
+        writes: []WriteDescriptorSet,
+    };
+
+    /// The description one dispatch needs per bound buffer.
+    pub const BufferBinding = struct {
+        buffer: VkBuffer,
+        size: u64,
+    };
+
+    /// The pipeline for `spirv` with `bindings` storage buffers, compiled on
+    /// first use and kept.
+    fn pipelineOf(self: *Device, spirv: []const u32, bindings: u32) Error!*Pipeline {
+        const key = pipelineKey(spirv, bindings);
+        const slot = &self.pipelines[@intCast(key % max_pipelines)];
+        if (slot.*) |*cached| {
+            if (cached.key == key) return cached;
+            // A different kernel hashed here: recycle the slot.
+            self.destroyCached(cached);
+            slot.* = null;
+        }
+        const made = try self.compilePipeline(key, spirv, bindings);
+        slot.* = made;
+        return &slot.*.?;
+    }
+
+    fn compilePipeline(self: *Device, key: u64, spirv: []const u32, binding_count: u32) Error!Pipeline {
+        const device = self.handle;
+
         const module_info = ShaderModuleCreateInfo{ .code_size = spirv.len * 4, .code = spirv.ptr };
         var module: VkShaderModule = undefined;
-        if (self.create_shader_module(self.handle, &module_info, null, &module) != VK_SUCCESS) {
+        if (self.create_shader_module(device, &module_info, null, &module) != VK_SUCCESS) {
             return Error.VulkanFailed;
         }
-        defer self.destroy_shader_module(self.handle, module, null);
+        errdefer self.destroy_shader_module(device, module, null);
 
-        // descriptor set layout: binding i = buffers[i]
-        const layouts = std.heap.page_allocator.alloc(DescriptorSetLayoutBinding, buffers.len) catch return Error.OutOfMemory;
+        // binding i = buffers[i], all of them storage buffers.
+        const layouts = std.heap.page_allocator.alloc(DescriptorSetLayoutBinding, binding_count) catch return Error.OutOfMemory;
         defer std.heap.page_allocator.free(layouts);
         for (layouts, 0..) |*b, i| b.* = .{ .binding = @intCast(i) };
         const layout_info = DescriptorSetLayoutCreateInfo{ .binding_count = binding_count, .bindings = layouts.ptr };
         var set_layout: VkDescriptorSetLayout = undefined;
-        if (self.create_descriptor_set_layout(self.handle, &layout_info, null, &set_layout) != VK_SUCCESS) {
+        if (self.create_descriptor_set_layout(device, &layout_info, null, &set_layout) != VK_SUCCESS) {
             return Error.VulkanFailed;
         }
-        defer self.destroy_descriptor_set_layout(self.handle, set_layout, null);
+        errdefer self.destroy_descriptor_set_layout(device, set_layout, null);
 
         const range = PushConstantRange{ .offset = 0, .size = @sizeOf(PushParams) };
         const pipeline_layout_info = PipelineLayoutCreateInfo{
@@ -945,79 +1010,120 @@ pub const Device = struct {
             .push_constant_range_count = 1,
             .push_constant_ranges = @ptrCast(&range),
         };
-        var pipeline_layout: VkPipelineLayout = undefined;
-        if (self.create_pipeline_layout(self.handle, &pipeline_layout_info, null, &pipeline_layout) != VK_SUCCESS) {
+        var layout: VkPipelineLayout = undefined;
+        if (self.create_pipeline_layout(device, &pipeline_layout_info, null, &layout) != VK_SUCCESS) {
             return Error.VulkanFailed;
         }
-        defer self.destroy_pipeline_layout(self.handle, pipeline_layout, null);
+        errdefer self.destroy_pipeline_layout(device, layout, null);
 
         const stage = PipelineShaderStageCreateInfo{ .module = module };
-        const pipe_info = ComputePipelineCreateInfo{ .stage = stage, .layout = pipeline_layout };
+        const pipe_info = ComputePipelineCreateInfo{ .stage = stage, .layout = layout };
         var pipeline: VkPipeline = undefined;
-        if (self.create_compute_pipelines(self.handle, null, 1, @ptrCast(&pipe_info), null, @ptrCast(&pipeline)) != VK_SUCCESS) {
+        if (self.create_compute_pipelines(device, null, 1, @ptrCast(&pipe_info), null, @ptrCast(&pipeline)) != VK_SUCCESS) {
             return Error.VulkanFailed;
         }
-        defer self.destroy_pipeline(self.handle, pipeline, null);
+        errdefer self.destroy_pipeline(device, pipeline, null);
 
         const pool_size = DescriptorPoolSize{ .descriptor_count = @max(binding_count, 1) };
         const pool_info = DescriptorPoolCreateInfo{ .pool_sizes = @ptrCast(&pool_size) };
         var pool: VkDescriptorPool = undefined;
-        if (self.create_descriptor_pool(self.handle, &pool_info, null, &pool) != VK_SUCCESS) return Error.VulkanFailed;
-        defer self.destroy_descriptor_pool(self.handle, pool, null);
+        if (self.create_descriptor_pool(device, &pool_info, null, &pool) != VK_SUCCESS) return Error.VulkanFailed;
+        errdefer self.destroy_descriptor_pool(device, pool, null);
 
         const alloc_info = DescriptorSetAllocateInfo{ .descriptor_pool = pool, .set_layouts = @ptrCast(&set_layout) };
         var set: VkDescriptorSet = undefined;
-        if (self.allocate_descriptor_sets(self.handle, &alloc_info, @ptrCast(&set)) != VK_SUCCESS) return Error.VulkanFailed;
+        if (self.allocate_descriptor_sets(device, &alloc_info, @ptrCast(&set)) != VK_SUCCESS) return Error.VulkanFailed;
 
-        const infos = std.heap.page_allocator.alloc(DescriptorBufferInfo, buffers.len) catch return Error.OutOfMemory;
-        defer std.heap.page_allocator.free(infos);
-        const writes = std.heap.page_allocator.alloc(WriteDescriptorSet, buffers.len) catch return Error.OutOfMemory;
-        defer std.heap.page_allocator.free(writes);
+        const infos = std.heap.page_allocator.alloc(DescriptorBufferInfo, binding_count) catch return Error.OutOfMemory;
+        errdefer std.heap.page_allocator.free(infos);
+        const writes = std.heap.page_allocator.alloc(WriteDescriptorSet, binding_count) catch return Error.OutOfMemory;
+        errdefer std.heap.page_allocator.free(writes);
+
+        return .{
+            .key = key,
+            .bindings = binding_count,
+            .module = module,
+            .set_layout = set_layout,
+            .layout = layout,
+            .pipeline = pipeline,
+            .pool = pool,
+            .set = set,
+            .infos = infos,
+            .writes = writes,
+        };
+    }
+
+    fn destroyCached(self: *Device, p: *Pipeline) void {
+        const device = self.handle;
+        self.destroy_pipeline(device, p.pipeline, null);
+        self.destroy_descriptor_pool(device, p.pool, null);
+        self.destroy_pipeline_layout(device, p.layout, null);
+        self.destroy_descriptor_set_layout(device, p.set_layout, null);
+        self.destroy_shader_module(device, p.module, null);
+        std.heap.page_allocator.free(p.infos);
+        std.heap.page_allocator.free(p.writes);
+    }
+
+    pub fn dispatchCompute(
+        self: *Device,
+        spirv: []const u32,
+        buffers: []const BufferBinding,
+        count: usize,
+        threads: u32,
+    ) Error!void {
+        if (spirv.len < 5) return Error.VulkanFailed;
+        const binding_count: u32 = @intCast(buffers.len);
+
+        // The workgroup size is baked into the module: read it back instead of
+        // trusting the caller, so every invocation is covered whichever value
+        // `threads` carries.
+        const fallback: [3]u32 = .{ @max(threads, 1), 1, 1 };
+        const local = spirv_mod.localSize(spirv) orelse fallback;
+        const workgroups: u32 = @intCast(@max((count + local[0] - 1) / local[0], 1));
+
+        const pipe = try self.pipelineOf(spirv, binding_count);
+
+        // The layout, the set and the pipeline outlive the dispatch; only the
+        // bindings differ, so this is a descriptor write, not set creation.
         for (buffers, 0..) |b, i| {
-            infos[i] = .{ .buffer = b.buffer, .offset = 0, .range = b.size };
-            writes[i] = .{
-                .dst_set = set,
+            pipe.infos[i] = .{ .buffer = b.buffer, .offset = 0, .range = b.size };
+            pipe.writes[i] = .{
+                .dst_set = pipe.set,
                 .dst_binding = @intCast(i),
-                .buffer_info = @ptrCast(&infos[i]),
+                .buffer_info = @ptrCast(&pipe.infos[i]),
             };
         }
-        if (buffers.len != 0) self.update_descriptor_sets(self.handle, binding_count, writes.ptr, 0, null);
-
-        // command buffer
-        const cb_info = CommandBufferAllocateInfo{ .command_pool = self.command_pool };
-        var cmd: VkCommandBuffer = undefined;
-        if (self.allocate_command_buffers(self.handle, &cb_info, @ptrCast(&cmd)) != VK_SUCCESS) return Error.VulkanFailed;
-        defer self.free_command_buffers(self.handle, self.command_pool, 1, @ptrCast(&cmd));
-
-        const begin = CommandBufferBeginInfo{};
-        if (self.begin_command_buffer(cmd, &begin) != VK_SUCCESS) return Error.VulkanFailed;
-        self.cmd_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
         if (buffers.len != 0) {
-            self.cmd_bind_descriptor_sets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0, 1, @ptrCast(&set), 0, null);
+            self.update_descriptor_sets(self.handle, binding_count, pipe.writes.ptr, 0, null);
         }
-        const params = PushParams{ .count = @intCast(count), .threads = locals };
-        self.cmd_push_constants(cmd, pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(PushParams), @ptrCast(&params));
-        self.cmd_dispatch(cmd, workgroups, 1, 1);
-        if (self.end_command_buffer(cmd) != VK_SUCCESS) return Error.VulkanFailed;
 
-        const fence_info = FenceCreateInfo{};
-        var fence: VkFence = undefined;
-        if (self.create_fence(self.handle, &fence_info, null, &fence) != VK_SUCCESS) return Error.VulkanFailed;
-        defer self.destroy_fence(self.handle, fence, null);
+        _ = self.reset_command_buffer(self.cmd, 0);
+        const begin = CommandBufferBeginInfo{};
+        if (self.begin_command_buffer(self.cmd, &begin) != VK_SUCCESS) return Error.VulkanFailed;
+        self.cmd_bind_pipeline(self.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe.pipeline);
+        if (buffers.len != 0) {
+            self.cmd_bind_descriptor_sets(self.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe.layout, 0, 1, @ptrCast(&pipe.set), 0, null);
+        }
+        const params = PushParams{ .count = @intCast(count), .threads = local[0] };
+        self.cmd_push_constants(self.cmd, pipe.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(PushParams), @ptrCast(&params));
+        self.cmd_dispatch(self.cmd, workgroups, 1, 1);
+        if (self.end_command_buffer(self.cmd) != VK_SUCCESS) return Error.VulkanFailed;
 
-        const submit = SubmitInfo{ .command_buffers = @ptrCast(&cmd) };
-        if (self.queue_submit(self.queue, 1, @ptrCast(&submit), fence) != VK_SUCCESS) return Error.VulkanFailed;
-        if (self.wait_for_fences(self.handle, 1, @ptrCast(&fence), 1, std.time.ns_per_s) != VK_SUCCESS) {
+        _ = self.reset_fences(self.handle, 1, @ptrCast(&self.fence));
+        const submit = SubmitInfo{ .command_buffers = @ptrCast(&self.cmd) };
+        if (self.queue_submit(self.queue, 1, @ptrCast(&submit), self.fence) != VK_SUCCESS) return Error.VulkanFailed;
+        if (self.wait_for_fences(self.handle, 1, @ptrCast(&self.fence), 1, std.time.ns_per_s) != VK_SUCCESS) {
             return Error.VulkanFailed;
         }
     }
-
-    /// The description one dispatch needs per bound buffer.
-    pub const BufferBinding = struct {
-        buffer: VkBuffer,
-        size: u64,
-    };
 };
+
+/// Pipelines are keyed by their bytecode and their binding count: the same
+/// kernel with different buffers is the same pipeline.
+fn pipelineKey(spirv: []const u32, bindings: u32) u64 {
+    const hash = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(spirv));
+    return hash ^ (@as(u64, bindings) *% 0x9E37_79B9_7F4A_7C15);
+}
 
 test "loader names match the host platform" {
     const names = libraryNames();

@@ -143,6 +143,7 @@ pub fn main(init: std.process.Init) !void {
     // this is the end-to-end verification, not a stub.
     try out.print("\ndevices:\n", .{});
     var all_ok = ok;
+    var gpu_ran: ?zb.Backend = null;
     for (zb.ALL) |b| {
         const maybe = try zb.openDevice(b);
         if (maybe == null) {
@@ -151,6 +152,7 @@ pub fn main(init: std.process.Init) !void {
         }
         var dev = maybe.?;
         defer dev.deinit();
+        if (b != .cpu) gpu_ran = b;
         if (!Scale.kernel.canRun(b)) {
             try out.print("  {s:<8} open, but the kernel has no {s} code\n", .{ b.name(), b.name() });
             continue;
@@ -166,6 +168,28 @@ pub fn main(init: std.process.Init) !void {
         all_ok = all_ok and good;
         try out.print("  {s:<8} ran {d} invocations: {s} (data[3] = {d})\n", .{ b.name(), n, if (good) "correct" else "WRONG", data[3] });
     }
+    // What one dispatch costs once the device is warm: the number covers the
+    // whole round trip (write the buffers, run the kernel, read them back), and
+    // the first dispatch is reported apart because it pays for the pipeline.
+    if (gpu_ran) |backend| {
+        const rounds: usize = 200;
+        var timing = zb.KernelCtx{ .buffers = &buffers, .count = n, .threads = 64, .alloc = alloc };
+        const warm_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+        try zb.dispatch(backend, Scale.kernel, &timing);
+        const warm_ns = std.Io.Clock.awake.now(init.io).nanoseconds - warm_start;
+        const loop_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+        var round: usize = 1;
+        while (round < rounds) : (round += 1) try zb.dispatch(backend, Scale.kernel, &timing);
+        const loop_ns = std.Io.Clock.awake.now(init.io).nanoseconds - loop_start;
+        const per_dispatch_us = @as(f64, @floatFromInt(loop_ns)) / @as(f64, @floatFromInt(rounds - 1)) / 1000.0;
+        try out.print("\n{s}: first dispatch {d} us (pipeline included), then {d:.1} us each over {d} more\n", .{
+            backend.name(),
+            @divTrunc(warm_ns, std.time.ns_per_us),
+            per_dispatch_us,
+            rounds - 1,
+        });
+    }
+
     // The cached devices `dispatch` uses are the same handles; closing them is
     // optional (the process exit does it), but saying so explicitly is tidier.
     zb.shutdownDevices();
