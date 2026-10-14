@@ -4,7 +4,7 @@
 外部依存ゼロ、ビルドは `zig build` ひとつ、ドキュメント生成もテストもベンチも Zig で書かれている。
 
 ```sh
-zig build test     # 24/24 green + リーク検査
+zig build test     # ユニット + 数値テスト（リーク検査込み）
 zig build check    # zig fmt --check + テスト
 zig build bench    # 計測（Zig のみ）
 zig build doc      # この HTML を生成
