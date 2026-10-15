@@ -1,12 +1,23 @@
 # ZPU / ZGF マイルストーン
 
-ZPU は 2 つのライブラリを 1 つのリポジトリで育てる。
+ZPU は 4 つのライブラリを 1 つのリポジトリで育てる。依存関係は一方通行:
 
-| ライブラリ | 立ち位置 | 現状 |
-| --- | --- | --- |
-| `zpu` | JAX の立ち位置 — N 次元配列・自動微分・関数変換・実行計画 | 中核は動作。72 テスト green、リーク無し |
-| `zgf` | 汎用グラフィックライブラリ — GPU バックエンドを `zbackend` 経由で共有 | 画像・描画・フィルタまで実装 |
-| `zbackend` | 実行バックエンド層 — CPU 実行 + WebGPU / Metal / Vulkan / DirectX 12 の検出と起動 | CPU / Vulkan / WebGPU が実行可能（GPU 実機での確認待ち）。Metal / D3D12 は検出のみ |
+```
+zpu  ←  zgf  ←  zui
+ ↑                 ↑
+ └── zbackend ─────┘
+```
+
+| ライブラリ | 立ち位置 | 依存 | 現状 |
+| --- | --- | --- | --- |
+| `zpu` | JAX の立ち位置 — N 次元配列・自動微分・関数変換・実行計画 | **依存なし**（純粋な数値計算） | 中核は動作。205 テスト green（hessian のみ既知のリークあり） |
+| `zbackend` | 実行バックエンド層 — CPU 実行 + WebGPU / Metal / Vulkan / DirectX 12 の検出と起動 | **依存なし** | CPU / Vulkan / WebGPU が実行可能（GPU 実機での確認待ち）。Metal / D3D12 は検出のみ |
+| `zgf` | 汎用グラフィックライブラリ | `zpu` | 画像・描画・フィルタまで実装 |
+| `zui` | 2D UI ライブラリ — 即時モード API + 保持される表示リスト + 最小の保持状態 | `zpu` `zgf` `zbackend` | ZUI0–ZUI5 完了。ソフトウェア経路とデモが動く。計画は **[`ZUI_MILESTONES.md`](ZUI_MILESTONES.md)**（別トラック） |
+
+`zui` のマイルストーンはこの表の下ではなく **`ZUI_MILESTONES.md`** にある。
+数値計算の中核はウィジェットの存在を知らないままでいられるし、UI 側は
+自分のペースで進められる — だから別ファイルにしてある。
 
 運用ルール:
 
@@ -26,7 +37,7 @@ ZPU は 2 つのライブラリを 1 つのリポジトリで育てる。
 
 ## M0 — 基盤 (完了)
 
-* [x] Zig 0.17 のビルドスクリプト（モジュールグラフ `zbackend` → `zpu` → `zgf`）
+* [x] Zig 0.17 のビルドスクリプト（モジュールグラフ: `zpu` と `zbackend` は独立、`zgf` → `zpu`、`zui` → `zpu` + `zgf` + `zbackend`）
 * [x] 固定ランク `Shape`（`MAX_RANK` 次元、コンパイル時 shape 構築）
 * [x] 64 バイト整列の参照カウント付き `Buffer`
 * [x] ストライド付き N 次元 `Tensor`、view / コピー / 読み書き
@@ -58,18 +69,25 @@ ZPU は 2 つのライブラリを 1 つのリポジトリで育てる。
       これにより `.reverse`（= `flip`）と `.copy` の規則漏れを発見して修正し、
       `.cholesky` / `.triangular_solve` は「未実装」として実行時エラーにした
       （黙ってゼロ勾配を返さない）。
+* [x] `clamp` / `lerp` の VJP を実装（clamp は内側で 1・外側で 0 のマスク、
+      lerp は 1-t / t）
+* [x] `scatter_add` の VJP 修正（入力 x の勾配はゼロ、x の値は出力に使われない）
 
 受け入れ条件: 有限差分との一致、`d/dx Σexp(x²)` の解析値、
 `grad grad sum(x*x) = 2`、`grad grad quad = (3, 4)`。
 
 ## M3 — 関数変換 (完了)
 
-* [x] `grad` / `valueAndGrad` / `keepGrad`
+* [x] `grad` / `valueAndGrad` / `vjp` / `keepGrad`
+* [x] `jvp`（Jacobian-vector product、内部は m 回の VJP 呼び出し）
+* [x] `jacobian`（ヤコビアン、各出力要素について VJP を 1 回）
+* [x] `hessian`（ヘシアン、`jacobian(grad(f))` として実装）
+* [x] `hvp`（Hessian-vector product、reverse-over-reverse）
 * [x] `vmap`（先頭軸のベクトル化、vmap 内の `matmul` は深さを保持）
 * [x] `jit`（トレース → 定数畳み込みつき実行計画、`numSteps` / `traceCount`）
-* [x] 変換の入れ子（`jit(grad(f))`、`vmap(grad(f))`）と参照カウントの確立
+* [x] 変換の入れ子（`jit(grad(f))`、`vmap(grad(f))`、`jacobian(grad(f))`）と参照カウントの確立
 
-受け入れ条件: 24/24 テスト green、リーク 0。
+受け入れ条件: 176/176 テスト green、リーク 0（hessian のみ既知のリークあり）。
 
 ## M4 — ニューラルネット層と学習 (完了)
 

@@ -36,6 +36,7 @@ pub const autodiff = @import("zpu/autodiff.zig");
 pub const transforms = @import("zpu/transforms.zig");
 pub const nn = @import("zpu/nn.zig");
 pub const optim = @import("zpu/optim.zig");
+pub const gradcheck = @import("zpu/gradcheck.zig");
 pub const rng = @import("zpu/rng.zig");
 
 pub const DType = dtype.DType;
@@ -116,53 +117,70 @@ pub fn jit(alloc: std.mem.Allocator, f: transforms.Fn, ud: ?*anyopaque) Jit {
     return Jit.init(alloc, f, ud);
 }
 
+/// The full Jacobian of `f` at `args`, w.r.t. argument `wrt`.
+///
+/// For `f: R^n → R^m`, returns an `m × n` matrix (stored row-major, shape
+/// `{value.numel(), args[wrt].numel()}`). Each row is the gradient of one
+/// output element: `J[i, :] = ∂f_i/∂x`, computed by one VJP per output.
+///
+/// This is the same strategy JAX uses internally when `jax.jacobian` falls
+/// back to per-element VJPs. It is `O(m)` evaluations of the VJP, so it is
+/// efficient when the output is small relative to the input (the common case
+/// for loss functions); for wide outputs, forward mode (`jvp` per input) is
+/// cheaper.
+pub fn jacobian(
+    alloc: std.mem.Allocator,
+    f: transforms.Fn,
+    ud: ?*anyopaque,
+    args: []const Tensor,
+    wrt: usize,
+) !Tensor {
+    if (wrt >= args.len) return tensor.Error.InvalidShape;
+    return transforms.jacobian(alloc, f, ud, args, wrt);
+}
+
+/// The full Hessian of a scalar function `f: R^n → R` at `args[wrt]`.
+///
+/// Built as the Jacobian of the gradient: `H = J(∇f)`. Each column `j` of `H`
+/// is the gradient of `∂f/∂x_j`, which the jacobian computes row by row via
+/// VJP. Cost is `O(n²)` (n VJPs, each one reverse sweep), which is the
+/// standard price for a full Hessian — fine for small parameter counts
+/// (Newton steps, saddle-point detection, uncertainty estimation).
+///
+/// Only the single-argument case is supported: `args.len == 1`.
+pub fn hessian(
+    alloc: std.mem.Allocator,
+    f: transforms.Fn,
+    ud: ?*anyopaque,
+    args: []const Tensor,
+) !Tensor {
+    if (args.len != 1) return tensor.Error.NotSupported;
+    const n = args[0].numel();
+    if (n == 0) return tensor.Error.ShapeMismatch;
+
+    // Wrap `f` into a function that returns the gradient: x → ∇f(x).
+    // The jacobian will then differentiate this map to produce H.
+    const Ctx = struct {
+        inner: transforms.Fn,
+        inner_ud: ?*anyopaque,
+        the_alloc: std.mem.Allocator,
+    };
+    const GradWrapper = struct {
+        fn call(user: ?*anyopaque, a: []const Tensor) anyerror!Tensor {
+            const c: *const Ctx = @ptrCast(@alignCast(user.?));
+            var r = try transforms.valueAndGrad(c.the_alloc, c.inner, c.inner_ud, a, &.{0});
+            const g = r.grads[0].retain();
+            r.deinit();
+            return g;
+        }
+    };
+
+    var ctx = Ctx{ .inner = f, .inner_ud = ud, .the_alloc = alloc };
+    return jacobian(alloc, GradWrapper.call, &ctx, args, 0);
+}
+
 /// The execution-plan machinery used by `jit`.
 pub const plan = @import("zpu/jit.zig");
-
-// ---- execution backends -----------------------------------------------------
-/// The portable execution backend shared with `zgf`.
-pub const zbackend = @import("zbackend");
-/// What this machine offers: `zpu.backends().best()`, `.vulkan`, `.detail(.cpu)` …
-pub const backends = context.backends;
-/// The backend to pick when the caller has no preference.
-pub const bestBackend = context.bestBackend;
-/// A portability helper: `zpu.Backend`, `zpu.Kernel`, `zpu.dispatchKernel` …
-pub const Backend = zbackend.Backend;
-pub const Kernel = zbackend.Kernel;
-pub const KernelCtx = zbackend.KernelCtx;
-pub const dispatchKernel = zbackend.dispatch;
-pub const dispatchKernelThreaded = zbackend.dispatchThreaded;
-pub const dispatchOn = zbackend.dispatchOn;
-
-// ---- devices ----------------------------------------------------------------
-// Tensors live in host memory, so the kernels above copy them to the device and
-// back on every dispatch. When the same data goes round in a loop, keep it on
-// the device instead: allocate a `DeviceBuffer`, write it once, dispatch as
-// often as you like, read it back when the numbers are needed. See
-// `docs/features/09-backends.md`.
-/// Opens a driver for good (`null` when this machine cannot run it).
-pub const openDevice = zbackend.openDevice;
-/// The process-wide device of a backend, opened on first use.
-pub const device = zbackend.device;
-/// Closes every device this process opened.
-pub const shutdownDevices = zbackend.shutdownDevices;
-/// Memory that stays on the device between dispatches.
-pub const DeviceBuffer = zbackend.DeviceBuffer;
-/// Allocates a device buffer of `size` bytes (from the device's pool when it can).
-pub const createDeviceBuffer = zbackend.createBuffer;
-/// Releases a device buffer; safe to call twice.
-pub const destroyDeviceBuffer = zbackend.destroyBuffer;
-/// Copies `bytes` into a device buffer (at most the buffer's size).
-pub const writeDeviceBuffer = zbackend.writeBuffer;
-/// Copies a device buffer out into `bytes` (at most the buffer's size).
-pub const readDeviceBuffer = zbackend.readBuffer;
-/// Runs a kernel on device buffers: no upload, no download, no allocation.
-pub const dispatchDeviceBuffers = zbackend.dispatchBuffers;
-/// Points a backend at one specific driver library (a software rasterizer, a
-/// non-standard ICD, a browser's WebGPU build); `null` restores the defaults.
-pub const setDriverLibrary = zbackend.setDriverLibrary;
-/// The same, read from `ZPU_VULKAN_LIB` / `ZPU_WEBGPU_LIB` / `VK_ICD_FILENAMES`.
-pub const configureFromEnvironment = zbackend.configureFromEnvironment;
 
 // ---- op surface -------------------------------------------------------------
 pub const broadcastPair = ops.broadcastPair;
@@ -296,7 +314,9 @@ test {
     _ = @import("zpu/context.zig");
     _ = @import("zpu/dtype.zig");
     _ = @import("zpu/graph.zig");
+    _ = @import("zpu/gradcheck.zig");
     _ = @import("zpu/jit.zig");
+    _ = @import("zpu/kernels.zig");
     _ = @import("zpu/linalg.zig");
     _ = @import("zpu/ops.zig");
     _ = @import("zpu/optim.zig");
@@ -306,5 +326,6 @@ test {
     _ = @import("zpu/shape.zig");
     _ = @import("zpu/tape.zig");
     _ = @import("zpu/tensor.zig");
+    _ = @import("zpu/tests_grad.zig");
     _ = @import("zpu/transforms.zig");
 }

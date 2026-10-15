@@ -104,6 +104,37 @@ pub const Image = struct {
         }
     }
 
+    /// Alpha-composites `src` *over* the existing pixel: the operation a
+    /// transparent UI needs and an opaque `setPixel` cannot express.
+    ///
+    /// Straight (non-premultiplied) alpha, because that is what a colour picker
+    /// hands a programmer: `out = src.rgb * a + dst.rgb * (1 - a)`.
+    pub fn blendPixel(self: *Image, x: usize, y: usize, src: Color) void {
+        if (x >= self.width() or y >= self.height()) return;
+        self.blendCoverage(x, y, src, 1);
+    }
+
+    /// `blendPixel` with the source alpha scaled by `coverage` in `0..1`: what
+    /// an antialiased edge or a font's coverage byte needs. Coverage is a
+    /// separate factor from the colour's own alpha, so a translucent shape still
+    /// gets a soft edge.
+    pub fn blendCoverage(self: *Image, x: usize, y: usize, src: Color, coverage: f32) void {
+        const a = src.a * std.math.clamp(coverage, 0, 1);
+        if (a <= 0) return;
+        if (x >= self.width() or y >= self.height()) return;
+        if (a >= 1) {
+            self.setPixel(@intCast(x), @intCast(y), src);
+            return;
+        }
+        const dst = self.getPixel(x, y);
+        self.setPixel(@intCast(x), @intCast(y), .{
+            .r = dst.r + (src.r - dst.r) * a,
+            .g = dst.g + (src.g - dst.g) * a,
+            .b = dst.b + (src.b - dst.b) * a,
+            .a = @max(dst.a, a + dst.a * (1 - a)),
+        });
+    }
+
     pub fn getPixel(self: *const Image, x: usize, y: usize) Color {
         const c = self.channels();
         const base = self.index(x, y, 0);
@@ -382,6 +413,23 @@ pub const Image = struct {
         return img;
     }
 
+    /// Takes a computed tensor as the new image ("what I just calculated is what
+    /// I want to look at"): `[H, W, C]` with `C` in 1, 3 or 4, clamped to
+    /// `0..1` and quantised to 8 bit. The tensor is *copied*, so the caller
+    /// keeps owning it — and anything a filter or a gradient produced can be
+    /// saved without a detour through a byte buffer.
+    pub fn fromTensor(alloc: std.mem.Allocator, t: zpu.Tensor) Error!Image {
+        if (t.rank() != 3) return Error.InvalidImage;
+        const h = t.shape.dims[0];
+        const w = t.shape.dims[1];
+        const c = t.shape.dims[2];
+        if (c != 1 and c != 3 and c != 4) return Error.InvalidImage;
+        var img = try Image.init(alloc, w, h, c);
+        errdefer img.deinit();
+        for (0..t.numel()) |i| img.pixels.writeF64(i, std.math.clamp(t.readLogical(t.numel(), i), 0, 1));
+        return img;
+    }
+
     /// Binary PPM/PGM (P6/P5). The header is text, the pixels are 8 bit sRGB.
     pub fn toPpm(self: *const Image, alloc: std.mem.Allocator) Error![]u8 {
         const body = try self.toPixels(alloc);
@@ -431,19 +479,44 @@ pub fn loadPpm(alloc: std.mem.Allocator, io: std.Io, path: []const u8) Error!Ima
     const bytes = try alloc.alloc(u8, len);
     defer alloc.free(bytes);
     _ = file.readPositionalAll(io, bytes, 0) catch return Error.IoFailed;
+    return decodePpm(alloc, bytes);
+}
 
-    // A one line header: magic, width, height, max value, then raw samples.
-    var it = std.mem.tokenizeAny(u8, bytes, " \t\r\n");
-    const magic = it.next() orelse return Error.InvalidImage;
+/// Decodes the bytes of a binary PPM/PGM file (`loadPpm` minus the filesystem).
+///
+/// The header is walked with an explicit cursor rather than a whitespace
+/// tokenizer: a tokenizer that also skips *leading* delimiters would run past
+/// the header's newline whenever the first pixel byte happens to be `\r`, `\n`,
+/// `\t` or a space — which is about one pixel in sixteen, so it is not a corner
+/// case but a coin flip. Only one whitespace byte may separate the max value
+/// from the samples, which is what `toPpm` writes.
+pub fn decodePpm(alloc: std.mem.Allocator, bytes: []const u8) Error!Image {
+    var pos: usize = 0;
+    var field: [4][]const u8 = undefined;
+    for (&field) |*f| {
+        while (pos < bytes.len and isPpmSpace(bytes[pos])) pos += 1;
+        const start = pos;
+        while (pos < bytes.len and !isPpmSpace(bytes[pos])) pos += 1;
+        if (pos == start) return Error.InvalidImage;
+        f.* = bytes[start..pos];
+    }
+    const magic = field[0];
     if (!std.mem.eql(u8, magic, "P5") and !std.mem.eql(u8, magic, "P6")) return Error.InvalidImage;
-    const w = std.fmt.parseUnsigned(usize, it.next() orelse return Error.InvalidImage, 10) catch return Error.InvalidImage;
-    const h = std.fmt.parseUnsigned(usize, it.next() orelse return Error.InvalidImage, 10) catch return Error.InvalidImage;
-    const max: usize = std.fmt.parseUnsigned(usize, it.next() orelse return Error.InvalidImage, 10) catch return Error.InvalidImage;
-    if (max != 255) return Error.InvalidImage;
+    const w = std.fmt.parseUnsigned(usize, field[1], 10) catch return Error.InvalidImage;
+    const h = std.fmt.parseUnsigned(usize, field[2], 10) catch return Error.InvalidImage;
+    const max = std.fmt.parseUnsigned(usize, field[3], 10) catch return Error.InvalidImage;
+    if (max != 255 or w == 0 or h == 0) return Error.InvalidImage;
+
+    if (pos >= bytes.len or !isPpmSpace(bytes[pos])) return Error.InvalidImage;
+    pos += 1;
     const channels: usize = if (magic[1] == '5') 1 else 3;
-    const header_len = @intFromPtr(it.rest().ptr) - @intFromPtr(bytes.ptr);
-    if (bytes.len < header_len + w * h * channels) return Error.InvalidImage;
-    return Image.fromPixels(alloc, w, h, channels, bytes[header_len..]);
+    const need = w * h * channels;
+    if (bytes.len < pos + need) return Error.InvalidImage;
+    return Image.fromPixels(alloc, w, h, channels, bytes[pos .. pos + need]);
+}
+
+fn isPpmSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\r' or c == '\n';
 }
 
 test "image basics" {
@@ -466,6 +539,30 @@ test "image basics" {
     // out of range writes are ignored, not a crash
     img.setPixel(-1, 5, .{ .r = 1, .g = 0, .b = 0 });
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), img.getPixel(3, 2).r, 1e-6);
+}
+
+test "alpha blending is src over dst" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 2, 1, 3);
+    defer img.deinit();
+    img.setPixel(0, 0, .{ .r = 1, .g = 1, .b = 1 });
+    img.setPixel(1, 0, .{ .r = 0, .g = 0, .b = 0 });
+
+    // Half of pure red over white, and a quarter of it over black.
+    img.blendPixel(0, 0, .{ .r = 1, .g = 0, .b = 0, .a = 0.5 });
+    const over_white = img.getPixel(0, 0);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), over_white.r, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), over_white.g, 1e-6);
+
+    img.blendCoverage(1, 0, .{ .r = 1, .g = 0, .b = 0, .a = 1 }, 0.25);
+    const over_black = img.getPixel(1, 0);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), over_black.r, 1e-6);
+
+    // Zero coverage is a no-op, and out-of-range writes are ignored.
+    const before = img.getPixel(1, 0);
+    img.blendCoverage(1, 0, .{ .r = 0, .g = 1, .b = 0, .a = 1 }, 0);
+    try std.testing.expectEqual(before.r, img.getPixel(1, 0).r);
+    img.blendPixel(99, 99, .{ .r = 1, .g = 1, .b = 1 });
 }
 
 test "pixels round trip through 8 bit" {
@@ -498,6 +595,69 @@ test "ppm bytes are a valid P6 file" {
     try std.testing.expectEqual(@as(usize, 11 + 6), ppm.len);
     try std.testing.expectEqual(@as(u8, 255), ppm[11]);
     try std.testing.expectEqual(@as(u8, 0), ppm[16]);
+}
+
+test "a tensor becomes an image without a byte detour" {
+    const alloc = std.testing.allocator;
+    try zpu.init(alloc, .{});
+    var scope = try zpu.Scope.init(alloc);
+    defer scope.deinit();
+
+    // A filter's output (or a gradient, or anything else the core produced) goes
+    // straight in; values outside 0..1 are clamped rather than wrapping.
+    var img = try Image.init(alloc, 2, 2, 3);
+    defer img.deinit();
+    img.fill(.{ .r = 0.25, .g = 0.5, .b = 0.75 });
+    const blurry = try img.blur(1);
+    var soft = try Image.fromTensor(alloc, blurry);
+    defer soft.deinit();
+    try std.testing.expectEqual(img.width(), soft.width());
+    try std.testing.expectEqual(img.channels(), soft.channels());
+    // Blurring pads with zeros, so border pixels can only get darker than the
+    // uniform colour they started from — and the channel ordering survives.
+    try std.testing.expect(soft.pixels.readF64(0) > 0.0);
+    try std.testing.expect(soft.pixels.readF64(0) <= 0.25 + 1e-6);
+    try std.testing.expect(soft.pixels.readF64(1) > soft.pixels.readF64(0));
+    try std.testing.expect(soft.pixels.readF64(2) > soft.pixels.readF64(1));
+
+    const out_of_range = try zpu.Tensor.full(zpu.Shape.initComptime(&.{ 2, 2, 3 }), .f32, 4.0);
+    var clamped = try Image.fromTensor(alloc, out_of_range);
+    defer clamped.deinit();
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), clamped.pixels.readF64(0), 1e-6);
+}
+
+test "ppm decodes back into the image it came from" {
+    const alloc = std.testing.allocator;
+    try zpu.init(alloc, .{});
+    var scope = try zpu.Scope.init(alloc);
+    defer scope.deinit();
+
+    // One of the pixels is chosen so that its first byte is 0x0d (`\r`): a
+    // header parser that tokenizes on whitespace runs past the header's newline
+    // on exactly this input. Every default-filled image is like this, because
+    // the background bytes are small integers.
+    var img = try Image.init(alloc, 3, 2, 3);
+    defer img.deinit();
+    img.fill(.{ .r = 13.0 / 255.0, .g = 10.0 / 255.0, .b = 32.0 / 255.0 });
+    img.setPixel(1, 1, .{ .r = 1, .g = 0.5, .b = 0.25 });
+
+    const ppm = try img.toPpm(alloc);
+    defer alloc.free(ppm);
+    var back = try decodePpm(alloc, ppm);
+    defer back.deinit();
+    try std.testing.expectEqual(img.width(), back.width());
+    try std.testing.expectEqual(img.height(), back.height());
+    try std.testing.expectEqual(img.channels(), back.channels());
+    for (0..img.numel()) |i| {
+        // 8-bit rounding is the only loss allowed on the way through
+        try std.testing.expectApproxEqAbs(img.pixels.readF64(i), back.pixels.readF64(i), 1.0 / 255.0);
+    }
+
+    // A colour image written as P6 with a mono body must be rejected, not
+    // silently reinterpreted.
+    try std.testing.expectError(Error.InvalidImage, decodePpm(alloc, "P6\n3 2\n255\n\x00\x01"));
+    try std.testing.expectError(Error.InvalidImage, decodePpm(alloc, "P3\n3 2\n255\n0 0 0"));
+    try std.testing.expectError(Error.InvalidImage, decodePpm(alloc, "P5\n0 2\n255\n"));
 }
 
 test "filters behave" {

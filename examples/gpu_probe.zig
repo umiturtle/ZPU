@@ -11,7 +11,7 @@
 //!    verifies the result.
 const std = @import("std");
 const zpu = @import("zpu");
-const zb = zpu.zbackend;
+const zb = @import("zbackend");
 
 const Io = std.Io;
 
@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
     // system loader cannot find) is one environment variable away.
     zb.configureFromEnvironment(init.environ_map);
 
-    const report = zpu.backends();
+    const report = zb.probe();
     try out.print("zpu {s} — execution backends\n\n", .{"0.1.0"});
     try out.print("{s:<8} {s:<9} {s:<34} {s:>6} {s:>8}  {s}\n", .{ "backend", "present", "library", "api", "devices", "device names" });
     try out.print("{s:-<8} {s:-<9} {s:-<34} {s:->6} {s:->8}  {s:-<20}\n", .{ "", "", "", "", "", "" });

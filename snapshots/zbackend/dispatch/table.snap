@@ -1,0 +1,15 @@
+webgpu (language wgsl): runs the kernel
+  cpu-only kernel: refuses
+metal (language msl): runs the kernel
+  cpu-only kernel: refuses
+vulkan (language glsl): falls back to the CPU
+  cpu-only kernel: refuses
+d3d12 (language hlsl): runs the kernel
+  cpu-only kernel: refuses
+cpu (language zig): runs the kernel
+  cpu-only kernel: runs
+lower(webgpu) -> source
+lower(metal) -> source
+lower(vulkan) -> source
+lower(d3d12) -> source
+lower(cpu) -> null

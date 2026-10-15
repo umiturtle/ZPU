@@ -1,0 +1,5 @@
+webgpu: 4 candidates
+  0. libwebgpu_dawn.so
+  1. libwgpu_native.so
+  2. libwebgpu.so
+  3. libdawn_native.so

@@ -1,0 +1,4 @@
+# zpu/tensor/ints
+# shape 2 3 dtype i32
+1 -2 3
+-4 5 -6

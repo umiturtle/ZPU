@@ -92,6 +92,10 @@ jobs:
         shell: bash
         run: zig build bench -- --quick 2>&1 | tee -a ci.log
 
+      - name: Consistency validation
+        shell: bash
+        run: ./tools/validate_consistency.sh 2>&1 | tee -a ci.log
+
       # The step summary shows up in the browser; the annotation shows up in the
       # API (`gh api .../check-runs/<id>/annotations`), which is how a red run is
       # read from a terminal. Write both.

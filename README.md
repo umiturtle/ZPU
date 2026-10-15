@@ -1,22 +1,34 @@
 # ZPU
 
-**Zig で書いた数値計算ライブラリ (`zpu`) と汎用グラフィックライブラリ (`zgf`)。**
+**Zig で書いた数値計算ライブラリ (`zpu`)・汎用グラフィックライブラリ (`zgf`)・2D UI ライブラリ (`zui`)。**
 Zig 0.17 のみ。外部依存もコード生成もビルド時の Python も無い。すべて `zig build` で完結する。
 
 ```sh
-zig build test     # 24/24 green。std.testing.allocator の下で走るのでリーク検査も兼ねる
+zig build test     # 205/205 green。std.testing.allocator の下で走るのでリーク検査も兼ねる
 zig build check    # zig fmt --check + テスト
 zig build bench    # カーネル別スループット (Zig のみ)
 zig build doc      # docs/out/ に HTML を生成
 ```
 
+## ライブラリ構成
+
+依存関係は一方通行で、下層は上層を知らない:
+
+```
+zpu  ←  zgf  ←  zui
+ ↑                 ↑
+ └── zbackend ─────┘
+```
+
 | | 中身 | 状態 |
 | --- | --- | --- |
-| `zpu` | JAX の立ち位置: N 次元配列・自動微分・関数変換・実行計画 | 中核完成 (M0–M4) |
-| `zgf` | 汎用グラフィックライブラリ。`zbackend` を共有して CPU/GPU 両対応へ | 立ち上げ中 (M8) |
-| `zbackend` | WebGPU / Metal / Vulkan / DirectX 12 を dlopen で扱うバックエンド層 | インターフェース完成 (M7) |
+| `zpu` | JAX の立ち位置: N 次元配列・自動微分・関数変換・実行計画。**純粋な数値計算ライブラリ。GPU バックエンドに依存しない** | 中核完成 (M0–M4) |
+| `zbackend` | WebGPU / Metal / Vulkan / DirectX 12 を dlopen で扱うバックエンド層。`zpu` とは独立 | インターフェース完成 (M7) |
+| `zgf` | 汎用グラフィックライブラリ。`zpu` のテンソルを使い、必要に応じて `zbackend` で GPU 加速 | 立ち上げ中 (M8) |
+| `zui` | 2D UI ライブラリ。即時モード API + 保持される表示リスト + 最小の保持状態。`zpu`・`zgf`・`zbackend` を使う | ソフトウェア経路が動作 ([`ZUI_MILESTONES.md`](ZUI_MILESTONES.md)) |
 
-計画と進捗は [`MILESTONES.md`](MILESTONES.md)、機能ごとの説明は [`docs/`](docs/) にある。
+計画と進捗は [`MILESTONES.md`](MILESTONES.md)（`zui` は別トラックの
+[`ZUI_MILESTONES.md`](ZUI_MILESTONES.md)）、機能ごとの説明は [`docs/`](docs/) にある。
 
 ## 30 秒でわかる `zpu`
 
@@ -60,7 +72,7 @@ pub fn main() !void {
 | `linalg` | 分解・逆行列・`solve`・`det`（`Error.Singular` を返す） |
 | `prims` / `tape` / `autodiff` | primitive と VJP/JVP 規則、逆方向スイープのエンジン |
 | `graph` / `jit` | 記録した DAG と、定数畳み込みつき実行計画 |
-| `transforms` | `grad` / `valueAndGrad` / `jvp` / `hvp` / `vmap` / `jit` |
+| `transforms` | `grad` / `valueAndGrad` / `vjp` / `jvp` / `jacobian` / `hessian` / `hvp` / `vmap` / `jit` |
 | `nn` / `optim` / `rng` | layerNorm・dropout・pooling・conv2d、SGD/Adam/RMSProp、乱数 |
 
 ### 変換
@@ -68,7 +80,10 @@ pub fn main() !void {
 ```zig
 const g   = try zpu.grad(alloc, f, null, args, &.{0});            // []Tensor（呼び出し側が所有）
 const vg  = try zpu.valueAndGrad(alloc, f, null, args, &.{0});    // .value と .grads
+const vjp = try zpu.vjp(alloc, f, null, args, &.{0}, cotangent);  // 明示的な余接ベクトル
 const jvp = try zpu.jvp(alloc, f, args, &.{v});                   // .value と .tangent
+const jac = try zpu.jacobian(alloc, f, null, args, 0);            // R^{m×n} のヤコビアン
+const hes = try zpu.hessian(alloc, f, null, args);                // R^{n×n} のヘシアン
 const hv  = try zpu.hvp(alloc, f, null, args, 0, v);              // H f(x) · v
 const vm  = try zpu.vmap(alloc, f, null, args);                   // 先頭軸をベクトル化
 

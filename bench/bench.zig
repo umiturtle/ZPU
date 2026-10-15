@@ -30,7 +30,9 @@
 //! `baseline.txt` is only meaningful for the machine that wrote it — that is
 //! what `--write-baseline` is for.
 const std = @import("std");
+const zgf = @import("zgf");
 const zpu = @import("zpu");
+const zui = @import("zui");
 const bench_options = @import("bench_options");
 
 const Io = std.Io;
@@ -97,6 +99,26 @@ const Env = struct {
     ln_b: Tensor,
     adam: zpu.optim.Adam,
     jit_loss: zpu.Jit,
+
+    // UI cases: one `Ui`, one framebuffer, and a body with enough widgets for
+    // the numbers to mean something (see `BenchBody`).
+    ui: zui.Ui,
+    fb: zgf.Image,
+    ui_app: UiApp,
+    /// The last frame as instances: the buffer a backend is handed, the flat
+    /// layout it uploads, and an RGBA target the kernel draws into.
+    instance_buf: [max_instances]zui.Instance = undefined,
+    instance_count: usize = 0,
+    flat: []f32,
+    target: []f32,
+    /// A second UI, this one a hundred thousand rows long, for the virtual-list
+    /// case: the number that matters is that its frame costs the rows you can
+    /// see, not the rows it has.
+    vlist: zui.Ui,
+    /// Alternates each iteration, so the frame really does rebuild: a frame whose
+    /// input is identical to the previous one is skipped by design (that is the
+    /// `ui frame idle` case).
+    ui_wiggle: bool = false,
 };
 
 const Case = struct {
@@ -211,6 +233,174 @@ fn caseJitGradMlp(env: *Env) !void {
     out.deinit();
 }
 
+// --------------------------------------------------------------------- zui
+//
+// Three things are worth measuring in a UI library, and the three are different
+// by orders of magnitude: laying a frame out (the body runs), noticing that a
+// frame *cannot* have changed (the body does not run), and turning the display
+// list into pixels. A GPU backend replaces the third; it does not replace the
+// first two.
+
+const ui_width: usize = 320;
+const ui_height: usize = 200;
+
+/// Room for the instance buffer: the bench body paints well under this, and a
+/// fixed array keeps the case free of allocation (the frame itself never
+/// allocates either).
+const max_instances: usize = 512;
+
+const UiApp = struct {
+    gain: f32 = 0.4,
+    toggled: bool = false,
+    radio: usize = 0,
+    clicks: usize = 0,
+    buf: [32]u8 = undefined,
+    field: zui.TextField = undefined,
+
+    fn init(self: *UiApp) void {
+        self.field = zui.TextField.init(&self.buf);
+    }
+};
+
+/// A body with every widget family in it: buttons, toggles, radios, a slider, a
+/// text field, a progress bar, a scrolling list and a collapsing section.
+const BenchBody = struct {
+    app: *UiApp,
+
+    pub fn run(self: @This(), u: *zui.Ui) zui.Ui.Error!void {
+        try u.container("root", .{ .w = .full, .h = .full, .pad = .all(12), .gap = 8, .bg = u.theme.bg }, BenchRoot{ .app = self.app });
+    }
+
+    const BenchRoot = struct {
+        app: *UiApp,
+        pub fn run(self: @This(), u: *zui.Ui) zui.Ui.Error!void {
+            try u.label("benchmark", .{ .color = u.theme.text_dim });
+            try u.container("controls", .{ .dir = .x, .gap = 6, .w = .full }, Controls{ .app = self.app });
+            _ = try u.slider("gain", &self.app.gain, .{ .min = 0, .max = 1, .w = .{ .px = 150 } });
+            _ = try u.textEdit("name", &self.app.field, .{ .placeholder = "type" });
+            try u.progress(self.app.gain, .{ .w = 240 });
+            try u.scrollable("list", .{ .style = .{ .w = .full, .h = .{ .px = 60 }, .gap = 2, .bg = u.theme.surface.withAlpha(0.6), .border = 1, .border_color = u.theme.border, .radius = 5 } }, Rows{});
+            _ = try u.collapsing("about", "About", .{}, About{});
+        }
+    };
+
+    const Controls = struct {
+        app: *UiApp,
+        pub fn run(self: @This(), u: *zui.Ui) zui.Ui.Error!void {
+            if (try u.button("Click me", .{ .w = .{ .px = 100 } })) self.app.clicks += 1;
+            _ = try u.checkbox("on", &self.app.toggled, .{});
+            _ = try u.radio("a", &self.app.radio, 0, .{});
+            _ = try u.radio("b", &self.app.radio, 1, .{});
+        }
+    };
+
+    const Rows = struct {
+        const names = [_][]const u8{ "row 0", "row 1", "row 2", "row 3", "row 4", "row 5", "row 6", "row 7" };
+        pub fn run(_: @This(), u: *zui.Ui) zui.Ui.Error!void {
+            for (names, 0..) |name, i| {
+                try u.container(name, .{ .w = .full, .h = .{ .px = 18 }, .pad = .xy(6, 1), .bg = u.theme.widget.withAlpha(if (i % 2 == 0) 0.75 else 0.4), .radius = 3 }, RowLabel{ .text = name });
+            }
+        }
+        const RowLabel = struct {
+            text: []const u8,
+            pub fn run(self: @This(), u: *zui.Ui) zui.Ui.Error!void {
+                try u.label(self.text, .{});
+            }
+        };
+    };
+
+    const About = struct {
+        pub fn run(_: @This(), u: *zui.Ui) zui.Ui.Error!void {
+            try u.label("A frame is a function of the input and the retained state.", .{ .color = u.theme.text_dim });
+        }
+    };
+};
+
+/// A hundred thousand rows in a viewport two rows tall. The frame that builds
+/// this is the frame that builds any other: the rows off screen are never called.
+const VListBody = struct {
+    pub fn run(_: @This(), u: *zui.Ui) zui.Ui.Error!void {
+        try u.virtualList("big", 100_000, .{
+            .style = .{ .w = .full, .h = .{ .px = ui_height }, .gap = 2 },
+            .row_height = 20,
+        }, VListBody{}, row);
+    }
+
+    fn row(_: @This(), u: *zui.Ui, i: usize, box: zui.Rect) zui.Ui.Error!void {
+        try u.paintRect(box, u.theme.widget);
+        var buf: [24]u8 = undefined;
+        const label = std.fmt.bufPrint(&buf, "row {d}", .{i}) catch unreachable;
+        try u.label(label, .{});
+    }
+};
+
+/// One frame of the virtual list, with the pointer moving so the frame rebuilds.
+fn caseVirtualList(env: *Env) !void {
+    env.ui_wiggle = !env.ui_wiggle;
+    const x: f32 = if (env.ui_wiggle) 58 else 59;
+    _ = try env.vlist.run(.{ .pointer = .{ .x = x, .y = 47 } }, VListBody{});
+}
+
+/// One frame with the pointer moving over a widget: the body runs, the picture
+/// changes.
+fn caseUiFrame(env: *Env) !void {
+    env.ui_wiggle = !env.ui_wiggle;
+    const x: f32 = if (env.ui_wiggle) 58 else 59;
+    _ = try env.ui.run(.{ .pointer = .{ .x = x, .y = 47 } }, BenchBody{ .app = &env.ui_app });
+}
+
+/// One frame in which nothing happened: the display list is reused, the body is
+/// not called.
+fn caseUiIdleFrame(env: *Env) !void {
+    const input = zui.Input{ .pointer = .{ .x = 9999, .y = 9999 } };
+    _ = try env.ui.run(input, BenchBody{ .app = &env.ui_app });
+}
+
+/// The display list of the last frame, rasterised into a framebuffer.
+fn caseUiRaster(env: *Env) !void {
+    zui.render.draw(&env.ui.list, &env.fb, .{ .clear = env.ui.theme.bg });
+}
+
+/// The same, at 2x device pixels — what a HiDPI host pays.
+fn caseUiRaster2x(env: *Env) !void {
+    zui.render.draw(&env.ui.list, &env.fb, .{ .clear = env.ui.theme.bg, .scale = 2 });
+}
+
+/// The last frame walked into an instance buffer: one record per shape, text
+/// expanded per glyph. This is pure list traversal — no pixels — so it is the
+/// cheapest part of a GPU frame and worth its own number.
+fn caseUiInstances(env: *Env) !void {
+    env.instance_count = zui.instances.collect(&env.ui.list, .{}, &env.instance_buf).len;
+}
+
+/// The same records flattened into the layout a device buffer wants.
+fn caseUiPack(env: *Env) !void {
+    _ = zui.pipeline.pack(env.instance_buf[0..env.instance_count], env.flat);
+}
+
+/// The frame drawn *from the buffer*, with the same coverage maths the
+/// software renderer uses — what a backend that runs invocations in order does.
+fn caseUiRasterViaInstances(env: *Env) !void {
+    zui.pipeline.draw(&env.ui.list, &env.fb, .{ .clear = env.ui.theme.bg }, &env.instance_buf);
+}
+
+/// A whole frame through the `zbackend` kernel into an RGBA target: the device
+/// path, on whatever backend is present (the CPU, on the machines CI runs on).
+fn caseUiKernelDispatch(env: *Env) !void {
+    env.instance_count = zui.instances.collect(&env.ui.list, .{}, &env.instance_buf).len;
+    // The same "clear, then draw" the software case does: the kernel blends over
+    // whatever the target already holds, so a target reused across frames has to
+    // start from the background.
+    const bg = env.ui.theme.bg;
+    for (0..ui_width * ui_height) |i| {
+        env.target[i * 4] = bg.r;
+        env.target[i * 4 + 1] = bg.g;
+        env.target[i * 4 + 2] = bg.b;
+        env.target[i * 4 + 3] = 1;
+    }
+    try zui.pipeline.dispatch(.cpu, env.instance_buf[0..env.instance_count], env.target, ui_width, ui_height, .{}, env.alloc);
+}
+
 const cases = [_]Case{
     .{ .name = "add f32 [1M]", .kind = .bytes, .work = 3 * 1_000_000 * 4, .run = caseAddF32 },
     .{ .name = "mul f64 [1M]", .kind = .bytes, .work = 3 * 1_000_000 * 8, .run = caseMulF64 },
@@ -224,6 +414,15 @@ const cases = [_]Case{
     .{ .name = "grad MLP f32 (batch 64)", .kind = .steps, .work = 1, .run = caseGradMlp },
     .{ .name = "adam step MLP f32", .kind = .steps, .work = 1, .run = caseAdamStep },
     .{ .name = "jit(grad MLP) f32", .kind = .steps, .work = 1, .run = caseJitGradMlp },
+    .{ .name = "ui frame build 320x200", .kind = .steps, .work = 1, .run = caseUiFrame },
+    .{ .name = "ui frame idle (reused)", .kind = .steps, .work = 1, .run = caseUiIdleFrame },
+    .{ .name = "ui raster 320x200", .kind = .items, .work = ui_width * ui_height, .run = caseUiRaster },
+    .{ .name = "ui raster 320x200 @2x", .kind = .items, .work = ui_width * ui_height * 4, .run = caseUiRaster2x },
+    .{ .name = "ui frame -> instances", .kind = .steps, .work = 1, .run = caseUiInstances },
+    .{ .name = "ui instance pack", .kind = .steps, .work = 1, .run = caseUiPack },
+    .{ .name = "ui raster via instances", .kind = .items, .work = ui_width * ui_height, .run = caseUiRasterViaInstances },
+    .{ .name = "ui kernel dispatch", .kind = .items, .work = ui_width * ui_height, .run = caseUiKernelDispatch },
+    .{ .name = "ui virtual list 100k rows", .kind = .steps, .work = 1, .run = caseVirtualList },
 };
 
 // ------------------------------------------------------------- the harness
@@ -443,7 +642,18 @@ fn initEnv(alloc: Allocator, io: Io) !Env {
         .ln_b = try zpu.Tensor.zeros(ln_shape, .f32),
         .adam = zpu.optim.Adam.init(alloc, .{ .lr = 1e-3 }),
         .jit_loss = zpu.jit(alloc, mlpLoss, null),
+        .ui = zui.Ui.init(alloc, .{ .width = @floatFromInt(ui_width), .height = @floatFromInt(ui_height) }),
+        .fb = try zgf.Image.init(alloc, ui_width, ui_height, 3),
+        .ui_app = .{},
+        .flat = try alloc.alloc(f32, max_instances * zui.pipeline.stride),
+        .target = try alloc.alloc(f32, ui_width * ui_height * 4),
+        .vlist = zui.Ui.init(alloc, .{ .width = @floatFromInt(ui_width), .height = @floatFromInt(ui_height) }),
     };
+    env.ui_app.init();
+    // One frame before the first case: the display list the raster cases draw is
+    // the one a real host would have produced, and the idle case needs a
+    // previous frame to reuse.
+    _ = try env.ui.run(.{ .pointer = .{ .x = 58, .y = 47 } }, BenchBody{ .app = &env.ui_app });
     // force a trace up front so the first timed iteration is a replay
     const jit_args = [_]Tensor{ env.x, env.w1, env.b1, env.w2, env.b2 };
     var first = try env.jit_loss.call(&jit_args);
@@ -460,6 +670,11 @@ fn deinitEnv(env: *Env) void {
     for (owned) |t| t.deinit();
     env.adam.deinit();
     env.jit_loss.deinit();
+    env.ui.deinit();
+    env.vlist.deinit();
+    env.fb.deinit();
+    env.alloc.free(env.flat);
+    env.alloc.free(env.target);
 }
 
 // ---------------------------------------------------------------- reporting

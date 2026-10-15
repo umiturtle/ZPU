@@ -375,8 +375,9 @@ fn releaseExtraRef(out: Tensor, graph: *const graph_mod.Graph) void {
         if (nd.out.id == out.id) accounted += 1;
     }
     for (context.tapes()) |raw| {
-        const tp: *tape_mod.Tape = @ptrCast(@alignCast(raw));
-        for (tp.nodes.items) |nd| {
+        const tp = raw orelse continue;
+        const tape_ptr: *tape_mod.Tape = @ptrCast(@alignCast(tp));
+        for (tape_ptr.nodes.items) |nd| {
             if (nd.out.id == out.id) accounted += 1;
         }
     }
@@ -446,4 +447,58 @@ pub const Jit = struct {
 
 pub fn jitFn(alloc: std.mem.Allocator, f: Fn, ud: ?*anyopaque) Jit {
     return Jit.init(alloc, f, ud);
+}
+
+/// The full Jacobian of `f` at `args`, w.r.t. argument `wrt`.
+///
+/// For `f: R^n → R^m`, returns an `m × n` matrix (stored row-major, shape
+/// `{value.numel(), args[wrt].numel()}`). Each row is the gradient of one
+/// output element: `J[i, :] = ∂f_i/∂x`, computed by one VJP per output.
+///
+/// This is the same strategy JAX uses internally when `jax.jacobian` falls
+/// back to per-element VJPs. It is `O(m)` evaluations of the VJP, so it is
+/// efficient when the output is small relative to the input (the common case
+/// for loss functions); for wide outputs, forward mode (`jvp` per input) is
+/// cheaper. A future optimisation can switch automatically.
+pub fn jacobian(
+    alloc: std.mem.Allocator,
+    f: Fn,
+    ud: ?*anyopaque,
+    args: []const Tensor,
+    wrt: usize,
+) !Tensor {
+    if (wrt >= args.len) return Error.InvalidShape;
+
+    var scope = try Scope.init(alloc);
+    defer scope.deinit();
+
+    const indices = try allIndices(alloc, args.len);
+    defer alloc.free(indices);
+
+    // Evaluate once to learn the output shape and size.
+    // Note: the function may return either a scope-owned or caller-owned tensor.
+    // We don't deinit it here to avoid double-free on scope-owned tensors.
+    // This may leak caller-owned tensors (e.g., from hessian's GradWrapper),
+    // but that's a known limitation of the current ownership model.
+    const value = try f(ud, args);
+    const m = value.numel();
+    const n = args[wrt].numel();
+    if (m == 0 or n == 0) return Error.ShapeMismatch;
+
+    const out_shape = try Shape.init(&.{ m, n });
+    var jac = try Tensor.zeros(out_shape, floatOf(value));
+
+    var j: usize = 0;
+    while (j < m) : (j += 1) {
+        const cot = try oneHotCotangent(value, j);
+        var r = try vjp(alloc, f, ud, args, indices, cot);
+        defer r.deinit();
+
+        const g = r.grads[0];
+        for (0..n) |k| {
+            jac.writeF64(j * n + k, g.readLogical(n, k));
+        }
+    }
+
+    return jac.retain();
 }

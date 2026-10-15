@@ -1,0 +1,8 @@
+kernel "zui_rasterize_instances"
+  webgpu: cpu fallback
+  metal: cpu fallback
+  vulkan: cpu fallback
+  d3d12: cpu fallback
+  cpu: runs
+atlas 128x93
+stride 20 floats per instance

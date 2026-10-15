@@ -16,6 +16,7 @@ const context = @import("context.zig");
 const prims = @import("prims.zig");
 const tmod = @import("tensor.zig");
 const scalar = @import("scalar.zig");
+const kernels = @import("kernels.zig");
 const tape_mod = @import("tape.zig");
 const graph_mod = @import("graph.zig");
 
@@ -125,8 +126,20 @@ fn iterFor(t: Tensor, out_shape: Shape) Offsets {
     return Offsets.init(out_shape, broadcastStrides(t, out_shape));
 }
 
+/// The buffer index of a memory offset from a view's origin.
+///
+/// The offsets the iterators walk are *signed*, because a view may have negative
+/// strides (`flip`, and the reverse slices that come out of it) and its origin is
+/// its first logical element. The sum is therefore only known to be a valid index
+/// *after* the addition, which is why this is one helper rather than a cast at
+/// every use site.
+inline fn at(t: Tensor, off: isize) usize {
+    const base: isize = @intCast(t.offset);
+    return @intCast(base + off);
+}
+
 fn readAtF64(t: Tensor, off: isize) f64 {
-    const i = t.offset + @as(usize, @intCast(off));
+    const i = at(t, off);
     return switch (t.dt) {
         inline else => |d| switch (d) {
             .bool => if (t.buf.data(bool)[i]) 1 else 0,
@@ -139,14 +152,19 @@ fn unaryKernel(comptime T: type, comptime p: Prim, a: Tensor, out: Tensor) void 
     const d = out.flatSliceMut(T).?;
     if (a.isContiguous() and a.shape.eql(out.shape)) {
         const src = a.buf.data(T);
-        for (0..d.len) |j| d[j] = scalar.unary(T, p, src[a.offset + j]);
+        const in = src[a.offset..][0..d.len];
+        // The vector kernel when this primitive has an exact one (see
+        // `kernels.hasVectorForm`), the scalar loop otherwise. Nothing here
+        // decides *what* to compute — only how many lanes at a time.
+        if (kernels.unaryFast(T, p, d, in)) return;
+        for (0..d.len) |j| d[j] = scalar.unary(T, p, in[j]);
         return;
     }
     const src = a.buf.data(T);
     var it = iterFor(a, out.shape);
     var j: usize = 0;
     while (it.next()) |o| : (j += 1) {
-        d[j] = scalar.unary(T, p, src[a.offset + @as(usize, @intCast(o))]);
+        d[j] = scalar.unary(T, p, src[at(a, o)]);
     }
 }
 
@@ -173,12 +191,30 @@ fn binaryKernel(comptime T: type, comptime p: Prim, a: Tensor, b: Tensor, out: T
     const db = b.buf.data(T);
     const fast_a = a.isContiguous() and a.shape.eql(out.shape);
     const fast_b = b.isContiguous() and b.shape.eql(out.shape);
+    // Three shapes cover almost every real call: two arrays of the output's own
+    // shape, and an array with a broadcast scalar. Both go to the vector
+    // kernels; everything else keeps the general (stride-walking) loop below.
+    if (fast_a and fast_b) {
+        if (kernels.binaryFast(T, p, d, da[a.offset..][0..d.len], db[b.offset..][0..d.len])) return;
+    } else if (fast_a and b.numel() == 1) {
+        const s = scalar.toF64(db[b.offset]);
+        const v: T = scalar.fromF64(T, s);
+        if (kernels.binaryScalarFast(T, p, d, da[a.offset..][0..d.len], v)) return;
+    } else if (fast_b and a.numel() == 1) {
+        const s = scalar.toF64(da[a.offset]);
+        const v: T = scalar.fromF64(T, s);
+        // Only the commuting operators may swap the operands.
+        switch (p) {
+            .add, .mul, .maximum, .minimum => if (kernels.binaryScalarFast(T, p, d, db[b.offset..][0..d.len], v)) return,
+            else => {},
+        }
+    }
     var ia = iterFor(a, out.shape);
     var ib = iterFor(b, out.shape);
     const n = out.numel();
     for (0..n) |j| {
-        const va = if (fast_a) da[a.offset + j] else da[a.offset + @as(usize, @intCast(ia.next().?))];
-        const vb = if (fast_b) db[b.offset + j] else db[b.offset + @as(usize, @intCast(ib.next().?))];
+        const va = if (fast_a) da[a.offset + j] else da[at(a, ia.next().?)];
+        const vb = if (fast_b) db[b.offset + j] else db[at(b, ib.next().?)];
         d[j] = scalar.binary(T, p, va, vb);
     }
 }
@@ -666,12 +702,54 @@ fn reduceKernel(
         }
     }
     const src = xc.buf.data(T);
+    // The fast case: the reduced axes are exactly the trailing ones, so the
+    // input is `outer` contiguous runs of `inner` and the output is one value
+    // per run in the same order. That is `sum(x, -1)`, `mean(x, -1)`,
+    // `sum(x)`, every softmax and every layer norm — and it makes the reduction
+    // a vector kernel instead of a stride walk.
+    if (comptime kernels.reduceVectorised(T)) {
+        if (trailingMask(xc, mask)) |split| {
+            const outer = split.outer;
+            const inner = split.inner;
+            if (inner * outer == xc.numel() and outer == out.numel()) {
+                kernels.reduceRows(T, switch (kind) {
+                    .sum => .sum,
+                    .prod => .prod,
+                    .max => .max,
+                    .min => .min,
+                    .any, .all => unreachable,
+                }, src[xc.offset..][0 .. outer * inner], d, inner);
+                return;
+            }
+        }
+    }
     var it = Offsets.init(xc.shape, vst);
     var j: usize = 0;
     while (it.next()) |o| : (j += 1) {
         const dst: usize = @intCast(o);
         d[dst] = reduceStep(T, kind, d[dst], src[xc.offset + j]);
     }
+}
+
+/// Splits `(outer, inner)` when `mask` reduces exactly the trailing axes of
+/// `x`'s contiguous shape — the condition the row-wise reduction kernel needs.
+fn trailingMask(x: Tensor, mask: [MAX_RANK]bool) ?struct { outer: usize, inner: usize } {
+    var reduced_axes: usize = 0;
+    var i = x.rank();
+    while (i > 0) : (i -= 1) {
+        if (!mask[i - 1]) break;
+        reduced_axes += 1;
+    }
+    if (reduced_axes == 0) return null;
+    // Everything before the first reduced axis must be kept.
+    for (0..x.rank() - reduced_axes) |k| {
+        if (mask[k]) return null;
+    }
+    var outer: usize = 1;
+    var inner: usize = 1;
+    for (0..x.rank() - reduced_axes) |k| outer *= x.shape.dims[k];
+    for (x.rank() - reduced_axes..x.rank()) |k| inner *= x.shape.dims[k];
+    return .{ .outer = outer, .inner = inner };
 }
 
 /// `any`/`all` on boolean inputs.
@@ -906,6 +984,12 @@ fn gemmTyped(
     const x = a.buf.data(T);
     const y = b.buf.data(T);
     const d = out.flatSliceMut(T).?;
+    if (comptime kernels.gemmVectorised(T)) {
+        // The blocked, vectorised kernel: the same product, with `b` streamed
+        // once per row block instead of once per row.
+        kernels.gemmBatch(T, x[a.offset..], y[b.offset..], d, m, k, n, batches);
+        return;
+    }
     for (0..batches) |bi| {
         const ao = a.offset + bi * m * k;
         const bo = b.offset + bi * k * n;
@@ -1126,12 +1210,16 @@ fn gemmBatched(
         const ao = a.offset + @as(usize, @intCast(aoff));
         const bo = b.offset + @as(usize, @intCast(boff));
         const do = batch * m * n;
-        for (0..m) |i| {
-            for (0..n) |j| d[do + i * n + j] = 0;
-            for (0..k) |p| {
-                const av = x[ao + i * k + p];
-                for (0..n) |j| {
-                    d[do + i * n + j] = reduceStep(T, .sum, d[do + i * n + j], accum(T, av, y[bo + p * n + j]));
+        if (comptime kernels.gemmVectorised(T)) {
+            kernels.gemm(T, x[ao..][0 .. m * k], y[bo..][0 .. k * n], d[do..][0 .. m * n], m, k, n);
+        } else {
+            for (0..m) |i| {
+                for (0..n) |j| d[do + i * n + j] = 0;
+                for (0..k) |p| {
+                    const av = x[ao + i * k + p];
+                    for (0..n) |j| {
+                        d[do + i * n + j] = reduceStep(T, .sum, d[do + i * n + j], accum(T, av, y[bo + p * n + j]));
+                    }
                 }
             }
         }
@@ -1459,15 +1547,18 @@ pub fn sliceView(x: Tensor, ranges_user: []const Range) Error!Tensor {
     const ranges = try fullRanges(x, ranges_user, &rbuf);
     if (ranges.len != x.rank()) return Error.ShapeMismatch;
     var out = x;
-    var off: usize = x.offset;
+    // Signed throughout: slicing a flipped (or otherwise negatively strided)
+    // tensor moves the offset *backwards*, so a usize accumulator would trap
+    // instead of producing the view. The result is still a valid element index.
+    var off: isize = @intCast(x.offset);
     for (0..x.rank()) |i| {
         const rr = try resolveRange(ranges[i], x.shape.dims[i]);
         out.shape.dims[i] = rr.len;
         out.strides[i] = x.strides[i] * rr.step;
-        off +|= @as(usize, @intCast(@as(isize, @intCast(rr.start)) * x.strides[i]));
+        off += @as(isize, @intCast(rr.start)) * x.strides[i];
     }
-    out.offset = off;
-    out.id = @import("tensor.zig").Tensor.viewOf(x, out.shape, out.strides, off).id;
+    out.offset = @intCast(off);
+    out.id = @import("tensor.zig").Tensor.viewOf(x, out.shape, out.strides, out.offset).id;
     return out;
 }
 
@@ -1516,7 +1607,7 @@ pub fn copyInto(dst: Tensor, src: Tensor) Error!void {
     var it = Offsets.init(dst.shape, dst.strides);
     for (0..n) |j| {
         const o = it.next().?;
-        writeAtF64(dst, dst.offset + @as(usize, @intCast(o)), src.readLogical(n, j));
+        writeAtF64(dst, at(dst, o), src.readLogical(n, j));
     }
 }
 
@@ -1693,8 +1784,12 @@ pub fn pad(x: Tensor, pads: []const [2]usize, value: f64) Error!Tensor {
 pub fn flip(x: Tensor, axis: i32) Error!Tensor {
     const a = try realAxis(x, axis);
     var out = x;
+    // Mirroring an axis leaves the first *logical* element at the far end of
+    // that axis. Flipping twice walks back to where it started, and flipping a
+    // already-flipped tensor therefore moves the offset backwards — signed.
     out.strides[a] = -x.strides[a];
-    out.offset = x.offset + @as(usize, @intCast(@as(isize, @intCast(x.shape.dims[a] - 1)) * x.strides[a]));
+    out.offset = @intCast(@as(isize, @intCast(x.offset)) +
+        @as(isize, @intCast(x.shape.dims[a] - 1)) * x.strides[a]);
     out.id = @import("tensor.zig").Tensor.viewOf(x, out.shape, out.strides, out.offset).id;
     return finish(.flip, &.{x}, out, .{ .axis = axis });
 }
