@@ -238,6 +238,169 @@ pub const Image = struct {
         }
     }
 
+    /// A linear gradient from left to right.
+    pub fn horizontalGradient(self: *Image, left: Color, right: Color) void {
+        const w = self.width();
+        for (0..self.height()) |y| {
+            for (0..w) |x| {
+                const t: f32 = if (w == 1) 0 else @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(w - 1));
+                const color = Color{
+                    .r = left.r + (right.r - left.r) * t,
+                    .g = left.g + (right.g - left.g) * t,
+                    .b = left.b + (right.b - left.b) * t,
+                    .a = left.a + (right.a - left.a) * t,
+                };
+                self.setPixel(@intCast(x), @intCast(y), color);
+            }
+        }
+    }
+
+    /// Draw a filled ellipse using the midpoint algorithm.
+    pub fn drawEllipse(self: *Image, cx: isize, cy: isize, rx: isize, ry: isize, color: Color) void {
+        if (rx <= 0 or ry <= 0) return;
+        var x: isize = 0;
+        var y: isize = ry;
+        const rx2 = rx * rx;
+        const ry2 = ry * ry;
+
+        // Region 1
+        var d1 = ry2 - rx2 * ry + 0.25 * rx2;
+        var dx: isize = 2 * ry2 * x;
+        var dy: isize = 2 * rx2 * y;
+
+        while (dx < dy) {
+            // Draw horizontal lines to fill
+            for (-x..x + 1) |xi| {
+                self.setPixel(cx + xi, cy + y, color);
+                self.setPixel(cx + xi, cy - y, color);
+            }
+            if (d1 < 0) {
+                x += 1;
+                dx += 2 * ry2;
+                d1 += dx + ry2;
+            } else {
+                x += 1;
+                y -= 1;
+                dx += 2 * ry2;
+                dy -= 2 * rx2;
+                d1 += dx - dy + ry2;
+            }
+        }
+
+        // Region 2
+        var d2 = ry2 * (x * x + x) + rx2 * (y - 1) * (y - 1) - rx2 * ry2;
+        while (y >= 0) {
+            for (-x..x + 1) |xi| {
+                self.setPixel(cx + xi, cy + y, color);
+                self.setPixel(cx + xi, cy - y, color);
+            }
+            if (d2 > 0) {
+                y -= 1;
+                dy -= 2 * rx2;
+                d2 += rx2 - dy;
+            } else {
+                y -= 1;
+                x += 1;
+                dx += 2 * ry2;
+                dy -= 2 * rx2;
+                d2 += dx - dy + rx2;
+            }
+        }
+    }
+
+    /// Draw a filled triangle using scanline rendering.
+    pub fn drawTriangle(self: *Image, x0: isize, y0: isize, x1: isize, y1: isize, x2: isize, y2: isize, color: Color) void {
+        // Sort vertices by y coordinate
+        var ax = x0;
+        var ay = y0;
+        var bx = x1;
+        var by = y1;
+        var cx = x2;
+        var cy = y2;
+
+        if (ay > by) {
+            std.mem.swap(isize, &ax, &bx);
+            std.mem.swap(isize, &ay, &by);
+        }
+        if (by > cy) {
+            std.mem.swap(isize, &bx, &cx);
+            std.mem.swap(isize, &by, &cy);
+        }
+        if (ay > by) {
+            std.mem.swap(isize, &ax, &bx);
+            std.mem.swap(isize, &ay, &by);
+        }
+
+        const total_height = cy - ay;
+        if (total_height == 0) return;
+
+        for (0..total_height) |i| {
+            const y = ay + @as(isize, @intCast(i));
+            const second_half = i > @as(usize, @intCast(by - ay)) or by == ay;
+            const segment_height = if (second_half) cy - by else by - ay;
+            if (segment_height == 0) continue;
+
+            const alpha: f32 = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(total_height));
+            const beta: f32 = @as(f32, @floatFromInt(if (second_half) i - @as(usize, @intCast(by - ay)) else i)) / @as(f32, @floatFromInt(segment_height));
+
+            var xa = ax + @as(isize, @intFromFloat(@as(f32, @floatFromInt(bx - ax)) * alpha));
+            var xb = if (second_half) bx + @as(isize, @intFromFloat(@as(f32, @floatFromInt(cx - bx)) * beta)) else ax + @as(isize, @intFromFloat(@as(f32, @floatFromInt(cx - ax)) * alpha));
+
+            if (xa > xb) {
+                std.mem.swap(isize, &xa, &xb);
+            }
+
+            for (@as(usize, @intCast(xa))..@as(usize, @intCast(xb + 1))) |x| {
+                self.setPixel(@intCast(x), y, color);
+            }
+        }
+    }
+
+    /// Draw a checkerboard pattern (useful for testing transparency).
+    pub fn drawCheckerboard(self: *Image, size: usize, color1: Color, color2: Color) void {
+        for (0..self.height()) |y| {
+            for (0..self.width()) |x| {
+                const checker = ((x / size) + (y / size)) % 2;
+                self.setPixel(@intCast(x), @intCast(y), if (checker == 0) color1 else color2);
+            }
+        }
+    }
+
+    /// Composite another image on top with alpha blending.
+    pub fn composite(self: *Image, src: *const Image, dst_x: isize, dst_y: isize) void {
+        if (src.channels() < 4 or self.channels() < 4) return; // Need alpha channel
+        for (0..src.height()) |sy| {
+            for (0..src.width()) |sx| {
+                const dx = dst_x + @as(isize, @intCast(sx));
+                const dy = dst_y + @as(isize, @intCast(sy));
+                if (dx < 0 or dy < 0) continue;
+                if (dx >= @as(isize, @intCast(self.width())) or dy >= @as(isize, @intCast(self.height()))) continue;
+
+                const sr = src.pixels.readF64(src.index(sx, sy, 0));
+                const sg = src.pixels.readF64(src.index(sx, sy, 1));
+                const sb = src.pixels.readF64(src.index(sx, sy, 2));
+                const sa = src.pixels.readF64(src.index(sx, sy, 3));
+
+                const dr = self.pixels.readF64(self.index(@intCast(dx), @intCast(dy), 0));
+                const dg = self.pixels.readF64(self.index(@intCast(dx), @intCast(dy), 1));
+                const db = self.pixels.readF64(self.index(@intCast(dx), @intCast(dy), 2));
+                const da = self.pixels.readF64(self.index(@intCast(dx), @intCast(dy), 3));
+
+                // Alpha blending (src-over)
+                const out_a = sa + da * (1 - sa);
+                if (out_a > 0) {
+                    const out_r = (sr * sa + dr * da * (1 - sa)) / out_a;
+                    const out_g = (sg * sa + dg * da * (1 - sa)) / out_a;
+                    const out_b = (sb * sa + db * da * (1 - sa)) / out_a;
+                    self.pixels.writeF64(self.index(@intCast(dx), @intCast(dy), 0), out_r);
+                    self.pixels.writeF64(self.index(@intCast(dx), @intCast(dy), 1), out_g);
+                    self.pixels.writeF64(self.index(@intCast(dx), @intCast(dy), 2), out_b);
+                    self.pixels.writeF64(self.index(@intCast(dx), @intCast(dy), 3), out_a);
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------------- filters
     //
     // Filters go through `zpu` operations, so they take a `Scope` (or the
@@ -300,6 +463,125 @@ pub const Image = struct {
         const back = try zpu.addScalar(scaled, 0.5);
         defer zpu.releaseTemp(back);
         return zpu.clamp(back, 0, 1);
+    }
+
+    /// Laplacian edge detection (4-connectivity kernel).
+    pub fn laplacian(self: *const Image) Error!zpu.Tensor {
+        const kernel = try zpu.Tensor.fromArray(f32, &.{ 0, 1, 0, 1, -4, 1, 0, 1, 0 }, zpu.Shape.initComptime(&.{ 3, 3 }));
+        defer zpu.releaseTemp(kernel);
+        const lap = try self.convolve2d(kernel);
+        defer zpu.releaseTemp(lap);
+        // Take absolute value for edge magnitude
+        return zpu.abs(lap);
+    }
+
+    /// Emboss filter: creates a 3D lighting effect.
+    pub fn emboss(self: *const Image) Error!zpu.Tensor {
+        const kernel = try zpu.Tensor.fromArray(f32, &.{ -2, -1, 0, -1, 1, 1, 0, 1, 2 }, zpu.Shape.initComptime(&.{ 3, 3 }));
+        defer zpu.releaseTemp(kernel);
+        const emb = try self.convolve2d(kernel);
+        defer zpu.releaseTemp(emb);
+        // Shift to 0..1 range and add base gray
+        const shifted = try zpu.addScalar(emb, 0.5);
+        defer zpu.releaseTemp(shifted);
+        return zpu.clamp(shifted, 0, 1);
+    }
+
+    /// Sepia tone: converts to warm brownish tone.
+    pub fn sepia(self: *const Image) Error!zpu.Tensor {
+        if (self.channels() < 3) return Error.InvalidImage;
+        const w = self.width();
+        const h = self.height();
+        var out = try Image.init(self.alloc, w, h, 3);
+        errdefer out.deinit();
+
+        for (0..h) |y| {
+            for (0..w) |x| {
+                const r = self.pixels.readF64(self.index(x, y, 0));
+                const g = self.pixels.readF64(self.index(x, y, 1));
+                const b = self.pixels.readF64(self.index(x, y, 2));
+
+                // Sepia transformation matrix
+                const out_r = 0.393 * r + 0.769 * g + 0.189 * b;
+                const out_g = 0.349 * r + 0.686 * g + 0.168 * b;
+                const out_b = 0.272 * r + 0.534 * g + 0.131 * b;
+
+                out.pixels.writeF64(out.index(x, y, 0), @min(out_r, 1.0));
+                out.pixels.writeF64(out.index(x, y, 1), @min(out_g, 1.0));
+                out.pixels.writeF64(out.index(x, y, 2), @min(out_b, 1.0));
+            }
+        }
+        return out.pixels;
+    }
+
+    /// Invert colors: `1 - x`.
+    pub fn invert(self: *const Image) Error!zpu.Tensor {
+        const inv = try zpu.subScalar(zpu.neg(self.pixels), -1.0);
+        defer zpu.releaseTemp(inv);
+        return zpu.clamp(inv, 0, 1);
+    }
+
+    /// Binary threshold: pixels > threshold become 1, else 0.
+    pub fn threshold(self: *const Image, t: f32) Error!zpu.Tensor {
+        const c = self.channels();
+        const w = self.width();
+        const h = self.height();
+        var out = try Image.init(self.alloc, w, h, c);
+        errdefer out.deinit();
+
+        for (0..h) |y| {
+            for (0..w) |x| {
+                for (0..c) |ch| {
+                    const v = self.pixels.readF64(self.index(x, y, ch));
+                    out.pixels.writeF64(out.index(x, y, ch), if (v > t) 1.0 else 0.0);
+                }
+            }
+        }
+        return out.pixels;
+    }
+
+    /// Posterize: reduce to N discrete levels per channel.
+    pub fn posterize(self: *const Image, levels: usize) Error!zpu.Tensor {
+        if (levels < 2) return Error.InvalidImage;
+        const c = self.channels();
+        const w = self.width();
+        const h = self.height();
+        var out = try Image.init(self.alloc, w, h, c);
+        errdefer out.deinit();
+
+        const step = 1.0 / @as(f64, @floatFromInt(levels - 1));
+        for (0..h) |y| {
+            for (0..w) |x| {
+                for (0..c) |ch| {
+                    const v = self.pixels.readF64(self.index(x, y, ch));
+                    const quantized = @round(v / step) * step;
+                    out.pixels.writeF64(out.index(x, y, ch), @min(quantized, 1.0));
+                }
+            }
+        }
+        return out.pixels;
+    }
+
+    /// Gamma correction: `x ^ (1/gamma)`.
+    pub fn gamma(self: *const Image, g: f32) Error!zpu.Tensor {
+        if (g <= 0) return Error.InvalidImage;
+        const inv_g = 1.0 / g;
+        const c = self.channels();
+        const w = self.width();
+        const h = self.height();
+        var out = try Image.init(self.alloc, w, h, c);
+        errdefer out.deinit();
+
+        for (0..h) |y| {
+            for (0..w) |x| {
+                for (0..c) |ch| {
+                    const v = self.pixels.readF64(self.index(x, y, ch));
+                    const corrected = @pow(v, inv_g);
+                    out.pixels.writeF64(out.index(x, y, ch), @min(corrected, 1.0));
+                }
+            }
+        }
+        return out.pixels;
     }
 
     /// Separable convolution over the x axis (`axis = 1`) or y axis (`axis = 0`)
