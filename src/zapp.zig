@@ -132,13 +132,12 @@ test "ZAPP version" {
 }
 
 test "ZAPP imports" {
-    // 主要な型が正しくエクスポートされていることを確認
-    const _ = Window;
-    const _ = WindowConfig;
-    const _ = Backend;
-    const _ = Event;
-    const _ = EventQueue;
-    const _ = App;
-    const _ = AppConfig;
-    const _ = Ui;
+    _ = Window;
+    _ = WindowConfig;
+    _ = Backend;
+    _ = Event;
+    _ = EventQueue;
+    _ = App;
+    _ = AppConfig;
+    _ = Ui;
 }

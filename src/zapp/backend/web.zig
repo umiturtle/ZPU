@@ -47,7 +47,7 @@ pub const WebWindow = struct {
         js.canvas_set_title(config.title.ptr, @intCast(config.title.len));
         
         // フレームバッファを作成
-        var framebuffer = try zgf.Image.init(allocator, config.width, config.height, 4);
+        const framebuffer = try zgf.Image.init(allocator, config.width, config.height, 4);
         
         return WebWindow{
             .framebuffer = framebuffer,
@@ -95,7 +95,7 @@ pub const WebWindow = struct {
         };
     }
     
-    pub fn setTitle(self: *WebWindow, title: []const u8) void {
+    pub fn setTitle(_: *WebWindow, title: []const u8) void {
         js.canvas_set_title(title.ptr, @intCast(title.len));
     }
     
@@ -123,31 +123,6 @@ pub const WebWindow = struct {
     }
 };
 
-// WebAssembly用のエントリポイント
-pub export fn main() void {
-    if (builtin.target.cpu.arch != .wasm32 and builtin.target.cpu.arch != .wasm64) return;
-    
-    const allocator = std.heap.wasm_allocator;
-    
-    var window = WebWindow.init(allocator, .{
-        .title = "ZAPP Web Application",
-        .width = 800,
-        .height = 600,
-    }) catch return;
-    defer window.deinit();
-    
-    // メインループ
-    while (window.isOpen()) {
-        window.pollEvents();
-        
-        // 描画処理
-        const fb = window.getFramebuffer();
-        _ = fb;
-        // ここでZUIのUIを描画
-        
-        window.present();
-    }
-}
 
 test "Web Window basic" {
     if (builtin.target.cpu.arch != .wasm32 and builtin.target.cpu.arch != .wasm64) return error.SkipZigTest;

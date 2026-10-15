@@ -225,7 +225,7 @@ pub fn build(b: *std.Build) void {
                 // when a program links libc; Zig's built-in ELF loader (what the
                 // library itself uses) does not. Programs that talk to real
                 // drivers want libc; the library never needs it.
-                .link_libc = std.mem.eql(u8, ex.name, "gpu-probe") or std.mem.eql(u8, ex.name, "zapp-demo") or std.mem.eql(u8, ex.name, "resize-test"),
+                .link_libc = std.mem.eql(u8, ex.name, "gpu-probe") or std.mem.eql(u8, ex.name, "zapp-demo"),
                 .imports = &.{
                     .{ .name = "zpu", .module = zpu_mod },
                     .{ .name = "zgf", .module = zgf_mod },
@@ -237,7 +237,7 @@ pub fn build(b: *std.Build) void {
             const exe = b.addExecutable(.{ .name = ex.name, .root_module = mod });
             
             // Link X11 for zapp-demo on Linux
-            if ((std.mem.eql(u8, ex.name, "zapp-demo") or std.mem.eql(u8, ex.name, "resize-test")) and target.result.os.tag == .linux) {
+            if (std.mem.eql(u8, ex.name, "zapp-demo") and target.result.os.tag == .linux) {
                 mod.linkSystemLibrary("X11", .{});
             }
             

@@ -53,6 +53,8 @@ pub const WindowConfig = struct {
     scale: f32 = 1.0, // HiDPI対応
 };
 
+pub const WindowSize = struct { width: u32, height: u32 };
+
 pub const WindowError = error{
     InitializationFailed,
     BackendNotAvailable,
@@ -76,7 +78,7 @@ pub const Window = struct {
         isOpen: *const fn (*const anyopaque) bool,
         pollEvents: *const fn (*anyopaque) void,
         present: *const fn (*anyopaque) void,
-        getSize: *const fn (*const anyopaque) struct { width: u32, height: u32 },
+        getSize: *const fn (*const anyopaque) WindowSize,
         setTitle: *const fn (*anyopaque, []const u8) void,
         getFramebuffer: *const fn (*anyopaque) *zgf.Image,
         resize: *const fn (*anyopaque, u32, u32) anyerror!void,
@@ -112,7 +114,7 @@ pub const Window = struct {
         self.vtable.present(self.impl);
     }
     
-    pub fn getSize(self: *const Window) struct { width: u32, height: u32 } {
+    pub fn getSize(self: *const Window) WindowSize {
         return self.vtable.getSize(self.impl);
     }
     
@@ -235,7 +237,7 @@ const SoftwareWindow = struct {
         // ソフトウェアモードでは何もしない（またはPPM出力）
     }
     
-    fn getSize(ptr: *const anyopaque) struct { width: u32, height: u32 } {
+    fn getSize(ptr: *const anyopaque) WindowSize {
         const self: *const SoftwareWindow = @ptrCast(@alignCast(ptr));
         return .{ .width = self.config.width, .height = self.config.height };
     }
@@ -332,9 +334,9 @@ const WebWindow = struct {
         self.impl.present();
     }
     
-    fn getSize(ptr: *const anyopaque) struct { width: u32, height: u32 } {
+    fn getSize(ptr: *const anyopaque) WindowSize {
         const self: *const WebWindow = @ptrCast(@alignCast(ptr));
-        return self.impl.getSize();
+        const _s = self.impl.getSize(); return .{ .width = _s.width, .height = _s.height };
     }
     
     fn setTitle(ptr: *anyopaque, title: []const u8) void {
@@ -408,9 +410,9 @@ const X11Window = struct {
         self.impl.present();
     }
     
-    fn getSize(ptr: *const anyopaque) struct { width: u32, height: u32 } {
+    fn getSize(ptr: *const anyopaque) WindowSize {
         const self: *const X11Window = @ptrCast(@alignCast(ptr));
-        return self.impl.getSize();
+        const _s = self.impl.getSize(); return .{ .width = _s.width, .height = _s.height };
     }
     
     fn setTitle(ptr: *anyopaque, title: []const u8) void {

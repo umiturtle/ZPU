@@ -158,7 +158,7 @@ pub const EventQueue = struct {
 
 /// ZUIの入力に変換
 pub fn toZuiInput(queue: *EventQueue) zui.Input {
-    var input = zui.Input{};
+    const input = zui.Input{};
     
     // TODO: イベントキューからZUIの入力状態を構築
     // - マウス位置

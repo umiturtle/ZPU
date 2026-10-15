@@ -218,8 +218,8 @@ pub const Ui = struct {
                 }, struct {
                     ctx_ptr: @TypeOf(ctx),
                     
-                    pub fn run(self: @This(), u: *zui.Ui) zui.Ui.Error!void {
-                        try body_fn(self.ctx_ptr, u);
+                    pub fn run(inner_s: @This(), inner_u: *zui.Ui) zui.Ui.Error!void {
+                        try body_fn(inner_s.ctx_ptr, inner_u);
                     }
                 }{ .ctx_ptr = ctx });
             }

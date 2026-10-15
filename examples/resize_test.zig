@@ -1,148 +1,82 @@
-//! リサイズテストプログラム
-//!
-//! 100x100 から 4K (3840x2160) まで、様々なサイズにリサイズして
-//! レンダリングが正しく動作することを確認する。
+//! リサイズテスト — 100x100 から 4K (3840x2160) まで
+//! スクリーンショットは snapshots/zapp/resize/ に PPM で保存される。
 
 const std = @import("std");
 const zapp = @import("zapp");
 const zgf = @import("zgf");
-const zui = @import("zui");
 
-const TestSize = struct {
-    width: u32,
-    height: u32,
-    name: []const u8,
-};
+const Dir = std.Io.Dir;
 
+const TestSize = struct { width: u32, height: u32, name: []const u8 };
 const test_sizes = [_]TestSize{
-    .{ .width = 100, .height = 100, .name = "Minimum (100x100)" },
-    .{ .width = 320, .height = 240, .name = "QVGA" },
-    .{ .width = 640, .height = 480, .name = "VGA" },
-    .{ .width = 800, .height = 600, .name = "SVGA" },
-    .{ .width = 1024, .height = 768, .name = "XGA" },
-    .{ .width = 1280, .height = 720, .name = "HD" },
-    .{ .width = 1366, .height = 768, .name = "WXGA" },
-    .{ .width = 1920, .height = 1080, .name = "Full HD" },
-    .{ .width = 2560, .height = 1440, .name = "QHD" },
-    .{ .width = 3840, .height = 2160, .name = "4K UHD" },
+    .{ .width = 100, .height = 100, .name = "100x100" },
+    .{ .width = 320, .height = 240, .name = "320x240_QVGA" },
+    .{ .width = 640, .height = 480, .name = "640x480_VGA" },
+    .{ .width = 800, .height = 600, .name = "800x600_SVGA" },
+    .{ .width = 1024, .height = 768, .name = "1024x768_XGA" },
+    .{ .width = 1280, .height = 720, .name = "1280x720_HD" },
+    .{ .width = 1366, .height = 768, .name = "1366x768_WXGA" },
+    .{ .width = 1920, .height = 1080, .name = "1920x1080_FullHD" },
+    .{ .width = 2560, .height = 1440, .name = "2560x1440_QHD" },
+    .{ .width = 3840, .height = 2160, .name = "3840x2160_4K" },
 };
 
-fn renderTestPattern(framebuffer: *zgf.Image, size_name: []const u8) void {
-    const width = framebuffer.width();
-    const height = framebuffer.height();
-    
-    // グラデーション背景
-    for (0..height) |y| {
-        for (0..width) |x| {
-            const r = @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(width));
-            const g = @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(height));
-            const b = 1.0 - (r + g) / 2.0;
-            framebuffer.setPixel(@intCast(x), @intCast(y), zgf.Color{ .r = r, .g = g, .b = b, .a = 1.0 });
-        }
-    }
-    
-    // チェッカーパターン（中央）
-    const checker_size = @max(width / 20, 10);
-    for (0..height) |y| {
-        for (0..width) |x| {
-            const check_x = x / checker_size;
-            const check_y = y / checker_size;
-            if ((check_x + check_y) % 2 == 0) {
-                if (x > width / 4 and x < width * 3 / 4 and y > height / 4 and y < height * 3 / 4) {
-                    framebuffer.setPixel(@intCast(x), @intCast(y), zgf.Color{ .r = 1.0, .g = 1.0, .b = 1.0, .a = 0.5 });
-                }
-            }
-        }
-    }
-    
-    // 枠線
-    const border_color = zgf.Color{ .r = 1.0, .g = 0.0, .b = 0.0, .a = 1.0 };
-    for (0..width) |x| {
-        framebuffer.setPixel(@intCast(x), 0, border_color);
-        framebuffer.setPixel(@intCast(x), @intCast(height - 1), border_color);
-    }
-    for (0..height) |y| {
-        framebuffer.setPixel(0, @intCast(y), border_color);
-        framebuffer.setPixel(@intCast(width - 1), @intCast(y), border_color);
-    }
-    
-    _ = size_name; // サイズ名はUIで表示（ソフトウェアバックエンドではテキスト描画なし）
-}
-
-fn saveScreenshot(framebuffer: *const zgf.Image, name: []const u8) !void {
-    const ppm = try framebuffer.toPpm(std.heap.page_allocator);
-    defer std.heap.page_allocator.free(ppm);
-    
-    const filename = try std.fmt.allocPrint(std.heap.page_allocator, "zig-out/resize_test_{s}.ppm", .{name});
-    defer std.heap.page_allocator.free(filename);
-    
-    const file = try std.fs.cwd().createFile(filename, .{});
-    defer file.close();
-    try file.writeAll(ppm);
-    
-    std.debug.print("  ✓ スクリーンショット保存: {s}\n", .{filename});
-}
-
-pub fn main() !void {
-    std.debug.print("\n=== ZAPP リサイズテスト ===\n\n", .{});
-    
-    // ソフトウェアバックエンドで初期化
-    var window = zapp.Window.init(.{
-        .title = "Resize Test",
-        .width = 100,
-        .height = 100,
-        .backend = .software,
-    }) catch |err| {
-        std.debug.print("エラー: ウィンドウ初期化に失敗しました: {}\n", .{err});
-        return err;
+fn renderPattern(fb: *zgf.Image) void {
+    const w = fb.width();
+    const h = fb.height();
+    for (0..h) |y| for (0..w) |x| {
+        const r = @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(w));
+        const g = @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(h));
+        fb.setPixel(@intCast(x), @intCast(y), .{ .r = r, .g = g, .b = 1.0 - (r + g) / 2.0 });
     };
-    defer window.deinit();
-    
-    // 出力ディレクトリを作成
-    std.fs.cwd().makePath("zig-out") catch {};
-    
-    // 各サイズでテスト
-    for (test_sizes) |test_size| {
-        std.debug.print("テスト中: {s} ({d}x{d})...\n", .{ test_size.name, test_size.width, test_size.height });
-        
-        // リサイズ
-        window.resize(test_size.width, test_size.height) catch |err| {
-            std.debug.print("  ✗ リサイズ失敗: {}\n", .{err});
-            continue;
-        };
-        
-        // サイズ確認
-        const size = window.getSize();
-        if (size.width != test_size.width or size.height != test_size.height) {
-            std.debug.print("  ✗ サイズ不一致: 期待={d}x{d}, 実際={d}x{d}\n", .{
-                test_size.width, test_size.height, size.width, size.height,
-            });
-            continue;
-        }
-        
-        // フレームバッファ確認
-        const fb = window.getFramebuffer();
-        if (fb.width() != test_size.width or fb.height() != test_size.height) {
-            std.debug.print("  ✗ フレームバッファサイズ不一致: 期待={d}x{d}, 実際={d}x{d}\n", .{
-                test_size.width, test_size.height, fb.width(), fb.height(),
-            });
-            continue;
-        }
-        
-        // テストパターンを描画
-        renderTestPattern(fb, test_size.name);
-        
-        // スクリーンショットを保存
-        const safe_name = try std.fmt.allocPrint(std.heap.page_allocator, "{d}x{d}", .{ test_size.width, test_size.height });
-        defer std.heap.page_allocator.free(safe_name);
-        
-        saveScreenshot(fb, safe_name) catch |err| {
-            std.debug.print("  ✗ スクリーンショット保存失敗: {}\n", .{err});
-            continue;
-        };
-        
-        std.debug.print("  ✓ 成功\n", .{});
+    const cs = @max(w / 20, 10);
+    for (0..h) |y| for (0..w) |x| {
+        if ((x / cs + y / cs) % 2 == 0 and x > w / 4 and x < w * 3 / 4 and y > h / 4 and y < h * 3 / 4)
+            fb.setPixel(@intCast(x), @intCast(y), .{ .r = 1, .g = 1, .b = 1, .a = 0.5 });
+    };
+    const lc = zgf.Color{ .r = 1, .g = 1, .b = 0, .a = 1 };
+    const m = @min(w, h);
+    for (0..m) |i| {
+        fb.setPixel(@intCast(i * w / m), @intCast(i * h / m), lc);
+        fb.setPixel(@intCast(w - 1 - i * w / m), @intCast(i * h / m), lc);
     }
-    
-    std.debug.print("\n=== テスト完了 ===\n", .{});
+    const bc = zgf.Color{ .r = 1, .g = 0, .b = 0, .a = 1 };
+    for (0..w) |x| { fb.setPixel(@intCast(x), 0, bc); fb.setPixel(@intCast(x), @intCast(h - 1), bc); }
+    for (0..h) |y| { fb.setPixel(0, @intCast(y), bc); fb.setPixel(@intCast(w - 1), @intCast(y), bc); }
+    const cc = zgf.Color{ .r = 0, .g = 1, .b = 0, .a = 1 };
+    for (0..w) |x| fb.setPixel(@intCast(x), @intCast(h / 2), cc);
+    for (0..h) |y| fb.setPixel(@intCast(w / 2), @intCast(y), cc);
+}
+
+fn save(io: std.Io, alloc: std.mem.Allocator, fb: *const zgf.Image, name: []const u8) !void {
+    const ppm = try fb.toPpm(alloc);
+    defer alloc.free(ppm);
+    const path = try std.fmt.allocPrint(alloc, "snapshots/zapp/resize/{s}.ppm", .{name});
+    defer alloc.free(path);
+    const f = try Dir.createFile(Dir.cwd(), io, path, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, ppm);
+    std.debug.print("  ✓ {s}\n", .{path});
+}
+
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const alloc = init.gpa;
+    std.debug.print("\n=== ZAPP リサイズテスト ===\n\n", .{});
+    Dir.cwd().createDirPath(io, "snapshots/zapp/resize") catch {};
+    var win = zapp.Window.init(.{ .title = "Resize", .width = 100, .height = 100, .backend = .software }) catch |e| {
+        std.debug.print("エラー: {}\n", .{e});
+        return e;
+    };
+    defer win.deinit();
+    for (test_sizes) |ts| {
+        std.debug.print("{s} ({d}x{d})... ", .{ ts.name, ts.width, ts.height });
+        win.resize(ts.width, ts.height) catch |e| { std.debug.print("✗ {}\n", .{e}); continue; };
+        const sz = win.getSize();
+        if (sz.width != ts.width or sz.height != ts.height) { std.debug.print("✗ size mismatch\n", .{}); continue; }
+        const fb = win.getFramebuffer();
+        renderPattern(fb);
+        save(io, alloc, fb, ts.name) catch |e| { std.debug.print("✗ {}\n", .{e}); continue; };
+    }
+    std.debug.print("\n=== 完了 ===\n", .{});
 }
