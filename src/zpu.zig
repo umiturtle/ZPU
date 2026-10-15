@@ -39,6 +39,7 @@ pub const optim = @import("zpu/optim.zig");
 pub const gradcheck = @import("zpu/gradcheck.zig");
 pub const rng = @import("zpu/rng.zig");
 pub const control_flow = @import("zpu/control_flow.zig");
+pub const fft = @import("zpu/fft.zig");
 
 pub const DType = dtype.DType;
 pub const Shape = shape.Shape;
