@@ -467,8 +467,12 @@ pub fn contribution(node: *const Node, i: usize, g: Tensor) Error!?Tensor {
             const z = try zerosLike(a);
             break :blk try ops.scatterAdd(z, b, g, attrs.axis);
         },
+        // `scatterAdd(x, idx, updates, axis)` builds its output from zeros, so
+        // the value of `x` never enters the computation — only its shape.
+        // The gradient w.r.t. `x` is therefore zero; the gradient w.r.t.
+        // `updates` is the slice of `g` at the scattered positions (#5).
         .scatter_add => blk: {
-            if (i == 0) break :blk g;
+            if (i == 0) break :blk null;
             if (i == 1) break :blk null;
             break :blk try ops.take(g, node.inputs[1], attrs.axis);
         },

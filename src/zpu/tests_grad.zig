@@ -723,3 +723,63 @@ test "gradient table: forward and reverse mode agree on the same number" {
     defer hvp.deinit();
     try std.testing.expectEqual(@as(usize, 5), hvp.numel());
 }
+
+test "jacobian: the rows are the per-output gradients" {
+    // For `f(x) = [x₀², x₀·x₁, x₁²]` the Jacobian at `(2, 3)` is
+    //   [[2x₀,  0 ]    [[4,  0]
+    //    [x₁,  x₀]] =  [3,  2]
+    //    [0,   2x₁]]    [0,  6]
+    var scope = try zpu.Scope.init(alloc);
+    defer scope.deinit();
+    const F = struct {
+        fn call(ud: ?*anyopaque, a: []const Tensor) anyerror!Tensor {
+            _ = ud;
+            const x0 = try zpu.sliceRanges(a[0], &.{ .{ .start = 0, .end = 1 }, .{ .start = 0, .end = 1 } });
+            const x1 = try zpu.sliceRanges(a[0], &.{ .{ .start = 1, .end = 2 }, .{ .start = 0, .end = 1 } });
+            const r0 = try zpu.mul(x0, x0);
+            const r1 = try zpu.mul(x0, x1);
+            const r2 = try zpu.mul(x1, x1);
+            return zpu.reshape(try zpu.concat(try zpu.concat(r0, r1, 0), r2, 0), try Shape.init(&.{3}));
+        }
+    };
+    const x = try Tensor.fromArray(f64, &.{ 2, 3 }, try Shape.init(&.{ 2, 1 }));
+    var args = [_]Tensor{x};
+    const jac = try zpu.jacobian(alloc, F.call, null, &args, 0);
+    defer { var jj = jac; jj.deinit(); }
+    try std.testing.expectEqual(@as(usize, 6), jac.numel());
+    try std.testing.expectApproxEqAbs(@as(f64, 4), jac.readF64(0), 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), jac.readF64(1), 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 3), jac.readF64(2), 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), jac.readF64(3), 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), jac.readF64(4), 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 6), jac.readF64(5), 1e-10);
+}
+
+test "hessian: the Hessian of a quadratic is its matrix" {
+    // f(x) = ½ xᵀ A x  →  ∇f = A x  →  H = A  (constant).
+    // Using A = [[3, 1], [1, 4]] (symmetric PD).
+    var scope = try zpu.Scope.init(alloc);
+    defer scope.deinit();
+    const F = struct {
+        fn call(ud: ?*anyopaque, a: []const Tensor) anyerror!Tensor {
+            _ = ud;
+            const A_data = &[_]f64{ 3, 1, 1, 4 };
+            const A = try Tensor.fromArray(f64, A_data, try Shape.init(&.{ 2, 2 }));
+            // Keep everything 1-D: treat x as a column, compute xᵀ A x = sum(x * (A @ x)).
+            const x = a[0];
+            const xr = try zpu.reshape(x, try Shape.init(&.{ 2, 1 }));
+            const Ax = try zpu.reshape(try zpu.matmul(A, xr), try Shape.init(&.{2}));
+            const quad = try zpu.sumAll(try zpu.mul(x, Ax));
+            return try zpu.mulScalar(quad, 0.5);
+        }
+    };
+    const x = try Tensor.fromArray(f64, &.{ 1, 2 }, try Shape.init(&.{2}));
+    var args = [_]Tensor{x};
+    const h = try zpu.hessian(alloc, F.call, null, &args);
+    defer { var hh = h; hh.deinit(); }
+    try std.testing.expectEqual(@as(usize, 4), h.numel());
+    try std.testing.expectApproxEqAbs(@as(f64, 3), h.readF64(0), 1e-8);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), h.readF64(1), 1e-8);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), h.readF64(2), 1e-8);
+    try std.testing.expectApproxEqAbs(@as(f64, 4), h.readF64(3), 1e-8);
+}

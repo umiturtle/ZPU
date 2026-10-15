@@ -117,6 +117,68 @@ pub fn jit(alloc: std.mem.Allocator, f: transforms.Fn, ud: ?*anyopaque) Jit {
     return Jit.init(alloc, f, ud);
 }
 
+/// The full Jacobian of `f` at `args`, w.r.t. argument `wrt`.
+///
+/// For `f: R^n → R^m`, returns an `m × n` matrix (stored row-major, shape
+/// `{value.numel(), args[wrt].numel()}`). Each row is the gradient of one
+/// output element: `J[i, :] = ∂f_i/∂x`, computed by one VJP per output.
+///
+/// This is the same strategy JAX uses internally when `jax.jacobian` falls
+/// back to per-element VJPs. It is `O(m)` evaluations of the VJP, so it is
+/// efficient when the output is small relative to the input (the common case
+/// for loss functions); for wide outputs, forward mode (`jvp` per input) is
+/// cheaper.
+pub fn jacobian(
+    alloc: std.mem.Allocator,
+    f: transforms.Fn,
+    ud: ?*anyopaque,
+    args: []const Tensor,
+    wrt: usize,
+) !Tensor {
+    if (wrt >= args.len) return tensor.Error.InvalidShape;
+    return transforms.jacobian(alloc, f, ud, args, wrt);
+}
+
+/// The full Hessian of a scalar function `f: R^n → R` at `args[wrt]`.
+///
+/// Built as the Jacobian of the gradient: `H = J(∇f)`. Each column `j` of `H`
+/// is the gradient of `∂f/∂x_j`, which the jacobian computes row by row via
+/// VJP. Cost is `O(n²)` (n VJPs, each one reverse sweep), which is the
+/// standard price for a full Hessian — fine for small parameter counts
+/// (Newton steps, saddle-point detection, uncertainty estimation).
+///
+/// Only the single-argument case is supported: `args.len == 1`.
+pub fn hessian(
+    alloc: std.mem.Allocator,
+    f: transforms.Fn,
+    ud: ?*anyopaque,
+    args: []const Tensor,
+) !Tensor {
+    if (args.len != 1) return tensor.Error.NotSupported;
+    const n = args[0].numel();
+    if (n == 0) return tensor.Error.ShapeMismatch;
+
+    // Wrap `f` into a function that returns the gradient: x → ∇f(x).
+    // The jacobian will then differentiate this map to produce H.
+    const Ctx = struct {
+        inner: transforms.Fn,
+        inner_ud: ?*anyopaque,
+        the_alloc: std.mem.Allocator,
+    };
+    const GradWrapper = struct {
+        fn call(user: ?*anyopaque, a: []const Tensor) anyerror!Tensor {
+            const c: *const Ctx = @ptrCast(@alignCast(user.?));
+            var r = try transforms.valueAndGrad(c.the_alloc, c.inner, c.inner_ud, a, &.{0});
+            const g = r.grads[0].retain();
+            r.deinit();
+            return g;
+        }
+    };
+
+    var ctx = Ctx{ .inner = f, .inner_ud = ud, .the_alloc = alloc };
+    return jacobian(alloc, GradWrapper.call, &ctx, args, 0);
+}
+
 /// The execution-plan machinery used by `jit`.
 pub const plan = @import("zpu/jit.zig");
 
