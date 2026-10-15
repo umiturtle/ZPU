@@ -1,0 +1,9 @@
+# zui/layout/boxes
+rounded 0.00,0.00 240.00x160.00 r=0.00 #ffffff00 border=0.00 #ffffff00
+rounded 8.00,8.00 76.00x20.00 r=0.00 #ffffff00 border=0.00 #ffffff00
+rounded 8.00,8.00 20.00x20.00 r=0.00 #ffffff00 border=0.00 #ffffff00
+rounded 32.00,8.00 20.00x20.00 r=0.00 #ffffff00 border=0.00 #ffffff00
+rounded 56.00,8.00 20.00x20.00 r=0.00 #ffffff00 border=0.00 #ffffff00
+rounded 8.00,32.00 224.00x28.00 r=0.00 #ffffff00 border=0.00 #ffffff00
+rounded 8.00,32.00 224.00x12.00 r=0.00 #ffffff00 border=0.00 #ffffff00
+rounded 8.00,46.00 224.00x12.00 r=0.00 #ffffff00 border=0.00 #ffffff00

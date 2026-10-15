@@ -1,0 +1,2 @@
+// scale workgroup 64
+fn main() { }

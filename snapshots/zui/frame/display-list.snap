@@ -1,0 +1,35 @@
+# zui/frame/display-list
+rounded 0.00,0.00 240.00x160.00 r=0.00 #ffffff00 border=0.00 #ffffff00
+rounded 10.00,10.00 90.00x26.00 r=5.00 #3a4257ff border=1.00 #3a4257ff
+text "Click me" at 28.50,28.00 size=14.0 #e6e9efff
+rounded 10.00,47.50 15.00x15.00 r=3.00 #3a4257ff border=1.00 #3a4257ff
+text "enabled" at 33.00,60.00 size=14.0 #e6e9efff
+rounded 96.00,47.50 15.00x15.00 r=7.50 #3a4257ff border=1.00 #3a4257ff
+rounded 100.20,51.70 6.60x6.60 r=3.30 #00000000 border=0.00 #00000000
+text "low" at 119.00,60.00 size=14.0 #e6e9efff
+rounded 152.00,47.50 15.00x15.00 r=7.50 #3a4257ff border=1.00 #3a4257ff
+text "high" at 175.00,60.00 size=14.0 #e6e9efff
+rounded 46.00,74.00 112.00x6.00 r=3.00 #3a4257ff border=1.00 #3a4257ff
+rounded 46.00,74.00 28.00x6.00 r=3.00 #00000000 border=0.00 #00000000
+rounded 68.00,71.00 12.00x12.00 r=6.00 #3a4257ff border=1.00 #3a4257ff
+text "gain" at 10.00,82.00 size=14.0 #9aa3b2ff
+text "0.25" at 166.00,82.00 size=14.0 #e6e9efff
+rounded 203.00,64.00 90.00x8.00 r=4.00 #3a4257ff border=1.00 #3a4257ff
+rounded 203.00,64.00 22.50x8.00 r=4.00 #00000000 border=0.00 #00000000
+rounded 10.00,84.00 220.00x26.00 r=3.00 #3a4257ff border=1.00 #3a4257ff
+push_clip 11.00,85.00 218.00x24.00
+text "type a word" at 18.00,102.00 size=14.0 #7b828eff
+pop_clip
+rounded 10.00,116.00 220.00x34.00 r=4.00 #3a4257ff border=1.00 #3a4257ff
+rounded 222.00,116.00 6.00x34.00 r=3.00 #00000000 border=0.00 #00000000
+rounded 222.00,116.00 6.00x24.00 r=3.00 #00000000 border=0.00 #00000000
+push_clip 10.00,116.00 210.00x34.00
+rounded 14.00,116.00 202.00x10.00 r=2.00 #00000000 border=0.00 #00000000
+text "row 0" at 14.00,130.00 size=14.0 #e6e9efff
+rounded 14.00,127.00 202.00x10.00 r=2.00 #00000000 border=0.00 #00000000
+text "row 1" at 14.00,141.00 size=14.0 #e6e9efff
+rounded 14.00,138.00 202.00x10.00 r=2.00 #00000000 border=0.00 #00000000
+text "row 2" at 14.00,152.00 size=14.0 #e6e9efff
+rounded 14.00,149.00 202.00x10.00 r=2.00 #00000000 border=0.00 #00000000
+text "row 3" at 14.00,163.00 size=14.0 #e6e9efff
+pop_clip

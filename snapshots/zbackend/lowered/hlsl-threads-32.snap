@@ -1,0 +1,2 @@
+// scale 32
+[numthreads(32,1,1)] void main() { }
