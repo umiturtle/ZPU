@@ -30,9 +30,14 @@ const zui = @import("zui");
 const zgf = @import("zgf");
 const zpu = @import("zpu");
 
+// バックエンドモジュール
+const x11_backend = @import("backend/x11.zig");
+const web_backend = @import("backend/web.zig");
+
 pub const Backend = enum {
     auto,       // プラットフォームに応じて自動選択
     software,   // ソフトウェアレンダリング（ヘッドレス）
+    x11,        // X11（Linux）
     vulkan,     // Vulkan（デスクトップ）
     webgpu,     // WebGPU（Web/デスクトップ）
     web,        // WebCanvas（WebAssembly）
@@ -82,6 +87,7 @@ pub const Window = struct {
             .vulkan => VulkanWindow.init(config),
             .webgpu => WebGPUWindow.init(config),
             .web => WebWindow.init(config),
+            .x11 => X11Window.init(config),
             else => WindowError.BackendNotAvailable,
         };
     }
@@ -138,12 +144,23 @@ pub const Window = struct {
         if (requested != .auto) return requested;
         
         // プラットフォームに応じて自動選択
-        if (builtin.target.os.tag == .emscripten or builtin.target.cpu.arch == .wasm32) {
+        const arch = builtin.target.cpu.arch;
+        const os = builtin.target.os.tag;
+        
+        // WebAssembly環境
+        if (arch == .wasm32 or arch == .wasm64) {
             return .web;
         }
         
-        // デスクトップではWebGPUを優先（なければVulkan、最後にソフトウェア）
-        return .software; // TODO: WebGPU/Vulkanの検出
+        // Linux環境
+        if (os == .linux) {
+            // X11が利用可能であればX11を使用
+            // それ以外はソフトウェアレンダリング
+            return .x11;
+        }
+        
+        // Windows/macOSはソフトウェアレンダリング（Vulkan/WebGPUは未実装）
+        return .software;
     }
 };
 
@@ -231,9 +248,140 @@ const WebGPUWindow = struct {
 
 /// Webウィンドウ（WebAssembly + Canvas）
 const WebWindow = struct {
-    // TODO: Web実装
-    pub fn init(_: WindowConfig) WindowError!Window {
-        return WindowError.BackendNotAvailable;
+    impl: web_backend.WebWindow,
+    
+    pub fn init(config: WindowConfig) WindowError!Window {
+        var self = std.heap.page_allocator.create(WebWindow) catch return WindowError.InitializationFailed;
+        errdefer std.heap.page_allocator.destroy(self);
+        
+        self.impl = web_backend.WebWindow.init(std.heap.page_allocator, .{
+            .title = config.title,
+            .width = config.width,
+            .height = config.height,
+        }) catch return WindowError.InitializationFailed;
+        
+        const vtable = std.heap.page_allocator.create(Window.VTable) catch return WindowError.InitializationFailed;
+        vtable.* = .{
+            .deinit = deinit,
+            .isOpen = isOpen,
+            .pollEvents = pollEvents,
+            .present = present,
+            .getSize = getSize,
+            .setTitle = setTitle,
+            .getFramebuffer = getFramebuffer,
+        };
+        
+        return .{
+            .impl = self,
+            .vtable = vtable,
+            .config = config,
+        };
+    }
+    
+    fn deinit(ptr: *anyopaque) void {
+        const self: *WebWindow = @ptrCast(@alignCast(ptr));
+        self.impl.deinit();
+        std.heap.page_allocator.destroy(self);
+    }
+    
+    fn isOpen(ptr: *const anyopaque) bool {
+        const self: *const WebWindow = @ptrCast(@alignCast(ptr));
+        return self.impl.isOpen();
+    }
+    
+    fn pollEvents(ptr: *anyopaque) void {
+        const self: *WebWindow = @ptrCast(@alignCast(ptr));
+        self.impl.pollEvents();
+    }
+    
+    fn present(ptr: *anyopaque) void {
+        const self: *WebWindow = @ptrCast(@alignCast(ptr));
+        self.impl.present();
+    }
+    
+    fn getSize(ptr: *const anyopaque) struct { width: u32, height: u32 } {
+        const self: *const WebWindow = @ptrCast(@alignCast(ptr));
+        return self.impl.getSize();
+    }
+    
+    fn setTitle(ptr: *anyopaque, title: []const u8) void {
+        const self: *WebWindow = @ptrCast(@alignCast(ptr));
+        self.impl.setTitle(title);
+    }
+    
+    fn getFramebuffer(ptr: *anyopaque) *zgf.Image {
+        const self: *WebWindow = @ptrCast(@alignCast(ptr));
+        return self.impl.getFramebuffer();
+    }
+};
+
+/// X11ウィンドウ（Linux）
+const X11Window = struct {
+    impl: x11_backend.X11Window,
+    
+    pub fn init(config: WindowConfig) WindowError!Window {
+        var self = std.heap.page_allocator.create(X11Window) catch return WindowError.InitializationFailed;
+        errdefer std.heap.page_allocator.destroy(self);
+        
+        self.impl = x11_backend.X11Window.init(std.heap.page_allocator, .{
+            .title = config.title,
+            .width = config.width,
+            .height = config.height,
+            .resizable = config.resizable,
+        }) catch return WindowError.InitializationFailed;
+        
+        const vtable = std.heap.page_allocator.create(Window.VTable) catch return WindowError.InitializationFailed;
+        vtable.* = .{
+            .deinit = deinit,
+            .isOpen = isOpen,
+            .pollEvents = pollEvents,
+            .present = present,
+            .getSize = getSize,
+            .setTitle = setTitle,
+            .getFramebuffer = getFramebuffer,
+        };
+        
+        return .{
+            .impl = self,
+            .vtable = vtable,
+            .config = config,
+        };
+    }
+    
+    fn deinit(ptr: *anyopaque) void {
+        const self: *X11Window = @ptrCast(@alignCast(ptr));
+        self.impl.deinit();
+        std.heap.page_allocator.destroy(self);
+    }
+    
+    fn isOpen(ptr: *const anyopaque) bool {
+        const self: *const X11Window = @ptrCast(@alignCast(ptr));
+        return self.impl.isOpen();
+    }
+    
+    fn pollEvents(ptr: *anyopaque) void {
+        const self: *X11Window = @ptrCast(@alignCast(ptr));
+        self.impl.pollEvents();
+    }
+    
+    fn present(ptr: *anyopaque) void {
+        const self: *X11Window = @ptrCast(@alignCast(ptr));
+        self.impl.present();
+    }
+    
+    fn getSize(ptr: *const anyopaque) struct { width: u32, height: u32 } {
+        const self: *const X11Window = @ptrCast(@alignCast(ptr));
+        return self.impl.getSize();
+    }
+    
+    fn setTitle(ptr: *anyopaque, title: []const u8) void {
+        const self: *X11Window = @ptrCast(@alignCast(ptr));
+        self.impl.setTitle(title);
+    }
+    
+    fn getFramebuffer(ptr: *anyopaque) *zgf.Image {
+        const self: *X11Window = @ptrCast(@alignCast(ptr));
+        return self.impl.getFramebuffer();
     }
 };
 
