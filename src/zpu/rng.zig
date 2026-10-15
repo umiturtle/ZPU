@@ -369,3 +369,115 @@ test "new distributions" {
     const bet_mean = sum / 1000.0;
     try std.testing.expect(@abs(bet_mean - 0.2857) < 0.05); // a/(a+b) = 2/7 ≈ 0.2857
 }
+
+test "exponential distribution variance" {
+    var gen = Rng.init(456);
+    
+    const shape = try Shape.init(&.{10000});
+    const exp = try gen.exponential(shape, .f64);
+    defer exp.deinit();
+    
+    var sum: f64 = 0;
+    var sum_sq: f64 = 0;
+    for (0..exp.numel()) |i| {
+        const v = exp.readF64(i);
+        sum += v;
+        sum_sq += v * v;
+    }
+    
+    const mean = sum / 10000.0;
+    const variance = sum_sq / 10000.0 - mean * mean;
+    
+    // Exponential(rate=1) has mean=1 and variance=1
+    try std.testing.expect(@abs(mean - 1.0) < 0.05);
+    try std.testing.expect(@abs(variance - 1.0) < 0.1);
+}
+
+test "gamma distribution variance" {
+    var gen = Rng.init(789);
+    
+    const shape = try Shape.init(&.{10000});
+    const gam = try gen.gamma(shape, 3.0, .f64); // shape=3, rate=1
+    defer gam.deinit();
+    
+    var sum: f64 = 0;
+    var sum_sq: f64 = 0;
+    for (0..gam.numel()) |i| {
+        const v = gam.readF64(i);
+        sum += v;
+        sum_sq += v * v;
+    }
+    
+    const mean = sum / 10000.0;
+    const variance = sum_sq / 10000.0 - mean * mean;
+    
+    // Gamma(shape=3, rate=1) has mean=3 and variance=3
+    try std.testing.expect(@abs(mean - 3.0) < 0.1);
+    try std.testing.expect(@abs(variance - 3.0) < 0.3);
+}
+
+test "beta distribution variance" {
+    var gen = Rng.init(101112);
+    
+    const shape = try Shape.init(&.{10000});
+    const bet = try gen.beta(shape, 2.0, 2.0, .f64); // symmetric beta
+    defer bet.deinit();
+    
+    var sum: f64 = 0;
+    var sum_sq: f64 = 0;
+    for (0..bet.numel()) |i| {
+        const v = bet.readF64(i);
+        sum += v;
+        sum_sq += v * v;
+    }
+    
+    const mean = sum / 10000.0;
+    const variance = sum_sq / 10000.0 - mean * mean;
+    
+    // Beta(2,2) has mean=0.5 and variance=1/20=0.05
+    try std.testing.expect(@abs(mean - 0.5) < 0.02);
+    try std.testing.expect(@abs(variance - 0.05) < 0.01);
+    
+    // All values should be in [0, 1]
+    for (0..bet.numel()) |i| {
+        const v = bet.readF64(i);
+        try std.testing.expect(v >= 0.0 and v <= 1.0);
+    }
+}
+
+test "bernoulli edge cases" {
+    var gen = Rng.init(131415);
+    
+    const shape = try Shape.init(&.{100});
+    
+    // p=0 should give all zeros
+    const bern0 = try gen.bernoulli(shape, 0.0);
+    defer bern0.deinit();
+    for (0..bern0.numel()) |i| {
+        try std.testing.expectEqual(@as(f64, 0.0), bern0.readF64(i));
+    }
+    
+    // p=1 should give all ones
+    const bern1 = try gen.bernoulli(shape, 1.0);
+    defer bern1.deinit();
+    for (0..bern1.numel()) |i| {
+        try std.testing.expectEqual(@as(f64, 1.0), bern1.readF64(i));
+    }
+}
+
+test "reproducibility across distributions" {
+    // Same seed should give same results
+    var gen1 = Rng.init(999);
+    var gen2 = Rng.init(999);
+    
+    const shape = try Shape.init(&.{100});
+    
+    const exp1 = try gen1.exponential(shape, .f64);
+    defer exp1.deinit();
+    const exp2 = try gen2.exponential(shape, .f64);
+    defer exp2.deinit();
+    
+    for (0..exp1.numel()) |i| {
+        try std.testing.expectEqual(exp1.readF64(i), exp2.readF64(i));
+    }
+}

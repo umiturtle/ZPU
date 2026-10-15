@@ -312,3 +312,82 @@ test "FFT inverse" {
         try std.testing.expectApproxEqAbs(@as(f64, @floatFromInt(i + 1)), re, 1e-10);
     }
 }
+
+test "FFT power spectrum" {
+    // Test power spectrum computation
+    const x = try Tensor.fromArray(f64, &.{ 1.0, 0.0, 0.0, 0.0 }, try Shape.init(&.{4}));
+    defer x.deinit();
+    
+    const power = try fftPower(x);
+    defer power.deinit();
+    
+    // For [1,0,0,0], all frequency components should have power 1
+    for (0..4) |i| {
+        try std.testing.expectApproxEqAbs(@as(f64, 1.0), power.readF64(i), 1e-10);
+    }
+}
+
+test "FFT magnitude spectrum" {
+    // Test magnitude spectrum computation
+    const x = try Tensor.fromArray(f64, &.{ 1.0, 1.0, 1.0, 1.0 }, try Shape.init(&.{4}));
+    defer x.deinit();
+    
+    const mag = try fftMag(x);
+    defer mag.deinit();
+    
+    // For constant signal, only DC component should be non-zero
+    try std.testing.expectApproxEqAbs(@as(f64, 4.0), mag.readF64(0), 1e-10);
+    for (1..4) |i| {
+        try std.testing.expectApproxEqAbs(@as(f64, 0.0), mag.readF64(i), 1e-10);
+    }
+}
+
+test "FFT with larger size" {
+    // Test FFT with size 8
+    var data: [8]f64 = undefined;
+    for (0..8) |i| {
+        data[i] = @as(f64, @floatFromInt(i));
+    }
+    
+    const x = try Tensor.fromArray(f64, &data, try Shape.init(&.{8}));
+    defer x.deinit();
+    
+    const fft_result = try fft1d(x);
+    defer fft_result.deinit();
+    
+    const recovered = try ifft1d(fft_result);
+    defer recovered.deinit();
+    
+    // Check reconstruction
+    for (0..8) |i| {
+        const re = recovered.readF64(2 * i);
+        try std.testing.expectApproxEqAbs(@as(f64, @floatFromInt(i)), re, 1e-9);
+    }
+}
+
+test "FFT Parseval's theorem" {
+    // Energy in time domain should equal energy in frequency domain (scaled)
+    const x = try Tensor.fromArray(f64, &.{ 1.0, 2.0, 3.0, 4.0 }, try Shape.init(&.{4}));
+    defer x.deinit();
+    
+    // Time domain energy
+    var time_energy: f64 = 0;
+    for (0..4) |i| {
+        const v = x.readF64(i);
+        time_energy += v * v;
+    }
+    
+    // Frequency domain energy
+    const fft_result = try fft1d(x);
+    defer fft_result.deinit();
+    
+    var freq_energy: f64 = 0;
+    for (0..4) |i| {
+        const re = fft_result.readF64(2 * i);
+        const im = fft_result.readF64(2 * i + 1);
+        freq_energy += re * re + im * im;
+    }
+    freq_energy /= 4.0; // Normalize by N
+    
+    try std.testing.expectApproxEqAbs(time_energy, freq_energy, 1e-9);
+}

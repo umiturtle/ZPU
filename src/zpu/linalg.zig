@@ -764,3 +764,144 @@ test "solve, inv, det and cholesky" {
     try std.testing.expectApproxEqAbs(@as(f64, 3), ts.readF64(0), 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 2), ts.readF64(1), 1e-12);
 }
+
+test "QR decomposition" {
+    const alloc = std.testing.allocator;
+    var scope = try tmod.Scope.init(alloc);
+    defer scope.deinit();
+    
+    // Test with a simple 3x2 matrix
+    const a = try Tensor.fromArray(f64, &.{ 1, 2, 3, 4, 5, 6 }, try Shape.init(&.{ 3, 2 }));
+    defer a.deinit();
+    
+    const qr_result = try qr(a);
+    defer qr_result.q.deinit();
+    defer qr_result.r.deinit();
+    
+    // Q should be orthogonal: Q^T Q = I
+    const qt = try ops.transpose(qr_result.q, &.{ 1, 0 });
+    defer qt.deinit();
+    const qtq = try ops.matmul(qt, qr_result.q);
+    defer qtq.deinit();
+    
+    // Check diagonal is 1 (identity)
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), qtq.readF64(0), 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), qtq.readF64(3), 1e-10);
+    
+    // Check off-diagonal is 0
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), qtq.readF64(1), 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), qtq.readF64(2), 1e-10);
+    
+    // R should be upper triangular
+    // For 3x2 input, R is 2x2
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), qr_result.r.readF64(2), 1e-10); // r[1,0] = 0
+    
+    // Check reconstruction: A = QR
+    const reconstructed = try ops.matmul(qr_result.q, qr_result.r);
+    defer reconstructed.deinit();
+    
+    for (0..6) |i| {
+        try std.testing.expectApproxEqAbs(a.readF64(i), reconstructed.readF64(i), 1e-9);
+    }
+}
+
+test "SVD basic" {
+    const alloc = std.testing.allocator;
+    var scope = try tmod.Scope.init(alloc);
+    defer scope.deinit();
+    
+    // Test with identity matrix
+    const a = try Tensor.fromArray(f64, &.{ 1, 0, 0, 1 }, try Shape.init(&.{ 2, 2 }));
+    defer a.deinit();
+    
+    const svd_result = try svd(a, false);
+    defer svd_result.u.deinit();
+    defer svd_result.s.deinit();
+    defer svd_result.vh.deinit();
+    
+    // Singular values should be [1, 1]
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), svd_result.s.readF64(0), 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), svd_result.s.readF64(1), 1e-10);
+}
+
+test "SVD diagonal matrix" {
+    const alloc = std.testing.allocator;
+    var scope = try tmod.Scope.init(alloc);
+    defer scope.deinit();
+    
+    // Test with diagonal matrix
+    const a = try Tensor.fromArray(f64, &.{ 3, 0, 0, 5 }, try Shape.init(&.{ 2, 2 }));
+    defer a.deinit();
+    
+    const svd_result = try svd(a, false);
+    defer svd_result.u.deinit();
+    defer svd_result.s.deinit();
+    defer svd_result.vh.deinit();
+    
+    // Singular values should be [5, 3] (sorted descending)
+    try std.testing.expectApproxEqAbs(@as(f64, 5.0), svd_result.s.readF64(0), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.0), svd_result.s.readF64(1), 1e-9);
+}
+
+test "eigh symmetric matrix" {
+    const alloc = std.testing.allocator;
+    var scope = try tmod.Scope.init(alloc);
+    defer scope.deinit();
+    
+    // Test with symmetric matrix [[2, 1], [1, 2]]
+    // Eigenvalues should be [1, 3]
+    const a = try Tensor.fromArray(f64, &.{ 2, 1, 1, 2 }, try Shape.init(&.{ 2, 2 }));
+    defer a.deinit();
+    
+    const eig_result = try eigh(a, true);
+    defer eig_result.w.deinit();
+    defer eig_result.v.deinit();
+    
+    // Eigenvalues (sorted)
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), eig_result.w.readF64(0), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.0), eig_result.w.readF64(1), 1e-9);
+}
+
+test "lstsq overdetermined" {
+    const alloc = std.testing.allocator;
+    var scope = try tmod.Scope.init(alloc);
+    defer scope.deinit();
+    
+    // Overdetermined system: more equations than unknowns
+    // A = [[1, 1], [1, 2], [1, 3]]
+    // b = [1, 2, 3]
+    // Solution should be close to [0, 1] (y = x)
+    const a = try Tensor.fromArray(f64, &.{ 1, 1, 1, 2, 1, 3 }, try Shape.init(&.{ 3, 2 }));
+    defer a.deinit();
+    const b = try Tensor.fromArray(f64, &.{ 1, 2, 3 }, try Shape.init(&.{3}));
+    defer b.deinit();
+    
+    const result = try lstsq(a, b, null);
+    defer result.x.deinit();
+    defer result.residuals.deinit();
+    defer result.s.deinit();
+    
+    // x should be close to [0, 1]
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), result.x.readF64(0), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), result.x.readF64(1), 1e-9);
+}
+
+test "matrixRank" {
+    const alloc = std.testing.allocator;
+    var scope = try tmod.Scope.init(alloc);
+    defer scope.deinit();
+    
+    // Full rank matrix
+    const a = try Tensor.fromArray(f64, &.{ 1, 2, 3, 4 }, try Shape.init(&.{ 2, 2 }));
+    defer a.deinit();
+    
+    const rank = try matrixRank(a, null);
+    try std.testing.expectEqual(@as(i32, 2), rank);
+    
+    // Rank-deficient matrix (rows are linearly dependent)
+    const b = try Tensor.fromArray(f64, &.{ 1, 2, 2, 4 }, try Shape.init(&.{ 2, 2 }));
+    defer b.deinit();
+    
+    const rank_b = try matrixRank(b, null);
+    try std.testing.expectEqual(@as(i32, 1), rank_b);
+}

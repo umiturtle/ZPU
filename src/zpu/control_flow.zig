@@ -269,3 +269,119 @@ test "cond basic" {
     
     try std.testing.expectApproxEqAbs(@as(f64, 15.0), result_false.item(), 1e-6);
 }
+
+test "scan basic" {
+    const alloc = std.testing.allocator;
+    var scope = try tmod.Scope.init(alloc);
+    defer scope.deinit();
+    
+    // Cumulative sum using scan
+    const xs = try Tensor.fromArray(f32, &.{ 1.0, 2.0, 3.0, 4.0 }, try Shape.init(&.{4}));
+    defer xs.deinit();
+    
+    const init = try Tensor.fromScalarF64(0.0, .f32);
+    
+    const result = try scan(struct {
+        fn f(carry: Tensor, x: Tensor) Error!struct { carry: Tensor, y: Tensor } {
+            const new_carry = try ops.add(carry, x);
+            return .{ .carry = new_carry, .y = new_carry };
+        }
+    }.f, init, xs);
+    defer result.final_carry.deinit();
+    defer result.ys.deinit();
+    
+    // Check cumulative sums: [1, 3, 6, 10]
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), result.ys.readF64(0), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.0), result.ys.readF64(1), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 6.0), result.ys.readF64(2), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 10.0), result.ys.readF64(3), 1e-6);
+    
+    // Final carry should be 10
+    try std.testing.expectApproxEqAbs(@as(f64, 10.0), result.final_carry.item(), 1e-6);
+}
+
+test "whileLoop basic" {
+    const alloc = std.testing.allocator;
+    var scope = try tmod.Scope.init(alloc);
+    defer scope.deinit();
+    
+    // Count down from 5 to 0
+    const init = try Tensor.fromScalarF64(5.0, .f32);
+    
+    const result = try whileLoop(struct {
+        fn cond(args: []const Tensor) Error!Tensor {
+            const zero = try ops.scalarLike(args[0], 0.0);
+            defer releaseTemp(zero);
+            return ops.gt(args[0], zero);
+        }
+        fn body(args: []const Tensor) Error!Tensor {
+            const one = try ops.scalarLike(args[0], 1.0);
+            defer releaseTemp(one);
+            return ops.sub(args[0], one);
+        }
+    }.cond, struct {
+        fn body(args: []const Tensor) Error!Tensor {
+            const one = try ops.scalarLike(args[0], 1.0);
+            defer releaseTemp(one);
+            return ops.sub(args[0], one);
+        }
+    }.body, &.{init});
+    defer result[0].deinit();
+    defer alloc.free(result);
+    
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), result[0].item(), 1e-6);
+}
+
+test "switch basic" {
+    const alloc = std.testing.allocator;
+    var scope = try tmod.Scope.init(alloc);
+    defer scope.deinit();
+    
+    const x = try Tensor.fromScalarF64(10.0, .f32);
+    defer x.deinit();
+    
+    const branches = [_]Fn{
+        struct {
+            fn f(args: []const Tensor) Error!Tensor {
+                const c = try ops.scalarLike(args[0], 2.0);
+                defer releaseTemp(c);
+                return ops.mul(args[0], c);
+            }
+        }.f,
+        struct {
+            fn f(args: []const Tensor) Error!Tensor {
+                const c = try ops.scalarLike(args[0], 3.0);
+                defer releaseTemp(c);
+                return ops.mul(args[0], c);
+            }
+        }.f,
+        struct {
+            fn f(args: []const Tensor) Error!Tensor {
+                const c = try ops.scalarLike(args[0], 4.0);
+                defer releaseTemp(c);
+                return ops.mul(args[0], c);
+            }
+        }.f,
+    };
+    
+    // Test index 0: 10 * 2 = 20
+    const idx0 = try Tensor.fromScalarF64(0.0, .i32);
+    defer idx0.deinit();
+    const result0 = try switch(idx0, &branches, &.{x});
+    defer result0.deinit();
+    try std.testing.expectApproxEqAbs(@as(f64, 20.0), result0.item(), 1e-6);
+    
+    // Test index 1: 10 * 3 = 30
+    const idx1 = try Tensor.fromScalarF64(1.0, .i32);
+    defer idx1.deinit();
+    const result1 = try switch(idx1, &branches, &.{x});
+    defer result1.deinit();
+    try std.testing.expectApproxEqAbs(@as(f64, 30.0), result1.item(), 1e-6);
+    
+    // Test index 2: 10 * 4 = 40
+    const idx2 = try Tensor.fromScalarF64(2.0, .i32);
+    defer idx2.deinit();
+    const result2 = try switch(idx2, &branches, &.{x});
+    defer result2.deinit();
+    try std.testing.expectApproxEqAbs(@as(f64, 40.0), result2.item(), 1e-6);
+}
