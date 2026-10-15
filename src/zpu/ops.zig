@@ -1776,6 +1776,199 @@ pub fn scatterAdd(x: Tensor, indices: Tensor, updates: Tensor, axis: i32) Error!
     return finish(.scatter_add, &.{ x, indices, updates }, out, .{ .axis = axis });
 }
 
+/// Dynamic slice: extracts a slice from `operand` starting at `start_indices`.
+/// Unlike regular slicing, the start indices are tensors (can be computed at runtime).
+/// JAX equivalent: jax.lax.dynamic_slice
+pub fn dynamicSlice(operand: Tensor, start_indices: []const Tensor, slice_sizes: []const usize) Error!Tensor {
+    if (start_indices.len != operand.rank()) return Error.ShapeMismatch;
+    if (slice_sizes.len != operand.rank()) return Error.ShapeMismatch;
+    
+    // Extract start positions from tensors
+    var starts: [MAX_RANK]usize = undefined;
+    for (start_indices, 0..) |idx_tensor, i| {
+        const idx_val = @as(i64, @intFromFloat(idx_tensor.readF64(0)));
+        const normalized_idx = if (idx_val < 0) idx_val + @as(i64, @intCast(operand.shape.dims[i])) else idx_val;
+        // Clamp to valid range
+        const clamped = @max(0, @min(normalized_idx, @as(i64, @intCast(operand.shape.dims[i])) - @as(i64, @intCast(slice_sizes[i]))));
+        starts[i] = @intCast(clamped);
+    }
+    
+    // Create output tensor
+    var out = try Tensor.empty(try Shape.init(slice_sizes), operand.dt);
+    out.batch_depth = operand.batch_depth;
+    
+    // Copy data
+    const op_c = try operand.toContiguous();
+    defer releaseTemp(op_c);
+    
+    // Iterate over output and copy from operand
+    var out_idx: [MAX_RANK]usize = @splat(0);
+    for (0..out.numel()) |flat_idx| {
+        // Convert flat index to multi-dimensional
+        var temp = flat_idx;
+        for (0..out.rank()) |dim| {
+            const stride = if (dim + 1 < out.rank()) blk: {
+                var s: usize = 1;
+                for (dim + 1..out.rank()) |d| s *= out.shape.dims[d];
+                break :blk s;
+            } else 1;
+            out_idx[dim] = temp / stride;
+            temp %= stride;
+        }
+        
+        // Compute source index in operand
+        var src_flat: usize = 0;
+        for (0..operand.rank()) |dim| {
+            var stride: usize = 1;
+            for (dim + 1..operand.rank()) |d| stride *= operand.shape.dims[d];
+            src_flat += (starts[dim] + out_idx[dim]) * stride;
+        }
+        
+        out.writeF64(flat_idx, op_c.readF64(src_flat));
+    }
+    
+    return out;
+}
+
+/// Dynamic update slice: updates a slice of `operand` at `start_indices` with `update`.
+/// JAX equivalent: jax.lax.dynamic_update_slice
+pub fn dynamicUpdateSlice(operand: Tensor, update: Tensor, start_indices: []const Tensor) Error!Tensor {
+    if (start_indices.len != operand.rank()) return Error.ShapeMismatch;
+    if (update.rank() != operand.rank()) return Error.ShapeMismatch;
+    
+    // Extract start positions
+    var starts: [MAX_RANK]usize = undefined;
+    for (start_indices, 0..) |idx_tensor, i| {
+        const idx_val = @as(i64, @intFromFloat(idx_tensor.readF64(0)));
+        const normalized_idx = if (idx_val < 0) idx_val + @as(i64, @intCast(operand.shape.dims[i])) else idx_val;
+        // Clamp to valid range
+        const clamped = @max(0, @min(normalized_idx, @as(i64, @intCast(operand.shape.dims[i])) - @as(i64, @intCast(update.shape.dims[i]))));
+        starts[i] = @intCast(clamped);
+    }
+    
+    // Clone operand
+    var out = try operand.clone();
+    
+    // Copy update data into output
+    const upd_c = try update.toContiguous();
+    defer releaseTemp(upd_c);
+    
+    var upd_idx: [MAX_RANK]usize = @splat(0);
+    for (0..update.numel()) |flat_idx| {
+        // Convert flat index to multi-dimensional
+        var temp = flat_idx;
+        for (0..update.rank()) |dim| {
+            const stride = if (dim + 1 < update.rank()) blk: {
+                var s: usize = 1;
+                for (dim + 1..update.rank()) |d| s *= update.shape.dims[d];
+                break :blk s;
+            } else 1;
+            upd_idx[dim] = temp / stride;
+            temp %= stride;
+        }
+        
+        // Compute destination index in output
+        var dst_flat: usize = 0;
+        for (0..operand.rank()) |dim| {
+            var stride: usize = 1;
+            for (dim + 1..operand.rank()) |d| stride *= operand.shape.dims[d];
+            dst_flat += (starts[dim] + upd_idx[dim]) * stride;
+        }
+        
+        out.writeF64(dst_flat, upd_c.readF64(flat_idx));
+    }
+    
+    return out;
+}
+
+/// Gather: advanced indexing operation with flexible dimension mappings.
+/// JAX equivalent: jax.lax.gather
+/// This is a simplified version that handles the most common case.
+pub fn gather(operand: Tensor, start_indices: Tensor, slice_sizes: []const usize) Error!Tensor {
+    if (operand.rank() != slice_sizes.len) return Error.ShapeMismatch;
+    
+    // start_indices shape: [batch..., num_indices]
+    // Output shape: [batch..., slice_sizes...]
+    const num_indices = start_indices.shape.dims[start_indices.rank() - 1];
+    if (num_indices != operand.rank()) return Error.ShapeMismatch;
+    
+    // Compute output shape
+    var out_dims: [MAX_RANK]usize = undefined;
+    var out_rank: usize = 0;
+    
+    // Add batch dimensions from start_indices
+    for (0..start_indices.rank() - 1) |i| {
+        out_dims[out_rank] = start_indices.shape.dims[i];
+        out_rank += 1;
+    }
+    
+    // Add slice dimensions
+    for (slice_sizes) |size| {
+        out_dims[out_rank] = size;
+        out_rank += 1;
+    }
+    
+    var out = try Tensor.empty(try Shape.init(out_dims[0..out_rank]), operand.dt);
+    out.batch_depth = operand.batch_depth;
+    
+    const op_c = try operand.toContiguous();
+    defer releaseTemp(op_c);
+    const si_c = try start_indices.toContiguous();
+    defer releaseTemp(si_c);
+    
+    // Iterate over batch dimensions
+    const batch_size = if (start_indices.rank() > 1) blk: {
+        var s: usize = 1;
+        for (0..start_indices.rank() - 1) |i| s *= start_indices.shape.dims[i];
+        break :blk s;
+    } else 1;
+    
+    for (0..batch_size) |batch_idx| {
+        // Get start indices for this batch
+        var starts: [MAX_RANK]usize = undefined;
+        for (0..num_indices) |i| {
+            const idx_val = @as(i64, @intFromFloat(si_c.readF64(batch_idx * num_indices + i)));
+            const normalized_idx = if (idx_val < 0) idx_val + @as(i64, @intCast(operand.shape.dims[i])) else idx_val;
+            const clamped = @max(0, @min(normalized_idx, @as(i64, @intCast(operand.shape.dims[i])) - @as(i64, @intCast(slice_sizes[i]))));
+            starts[i] = @intCast(clamped);
+        }
+        
+        // Copy slice
+        var slice_idx: [MAX_RANK]usize = @splat(0);
+        var slice_numel: usize = 1;
+        for (slice_sizes) |s| slice_numel *= s;
+        
+        for (0..slice_numel) |flat_slice_idx| {
+            // Convert to multi-dim
+            var temp = flat_slice_idx;
+            for (0..slice_sizes.len) |dim| {
+                const stride = if (dim + 1 < slice_sizes.len) blk: {
+                    var s: usize = 1;
+                    for (dim + 1..slice_sizes.len) |d| s *= slice_sizes[d];
+                    break :blk s;
+                } else 1;
+                slice_idx[dim] = temp / stride;
+                temp %= stride;
+            }
+            
+            // Compute source index in operand
+            var src_flat: usize = 0;
+            for (0..operand.rank()) |dim| {
+                var stride: usize = 1;
+                for (dim + 1..operand.rank()) |d| stride *= operand.shape.dims[d];
+                src_flat += (starts[dim] + slice_idx[dim]) * stride;
+            }
+            
+            // Compute destination index in output
+            var dst_flat: usize = batch_idx * slice_numel + flat_slice_idx;
+            
+            out.writeF64(dst_flat, op_c.readF64(src_flat));
+        }
+    }
+    
+    return out;
+}
+
 pub fn pad(x: Tensor, pads: []const [2]usize, value: f64) Error!Tensor {
     if (pads.len != x.rank()) return Error.ShapeMismatch;
     var dims = x.shape.dims;
