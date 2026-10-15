@@ -204,11 +204,15 @@ pub fn layerNorm(x: Tensor, weight: Tensor, bias: Tensor, eps: f64, axis: i32) E
     defer ops.releaseTemp(m);
     const c = try ops.sub(x, m);
     defer ops.releaseTemp(c);
-    const v = try ops.mean(try ops.square(c), axis, true);
+    const sq = try ops.square(c);
+    defer ops.releaseTemp(sq);
+    const v = try ops.mean(sq, axis, true);
     defer ops.releaseTemp(v);
     const e = try ops.scalarLike(v, eps);
     defer ops.releaseTemp(e);
-    const den = try ops.sqrt(try ops.add(v, e));
+    const ve = try ops.add(v, e);
+    defer ops.releaseTemp(ve);
+    const den = try ops.sqrt(ve);
     defer ops.releaseTemp(den);
     const n = try ops.div(c, den);
     defer ops.releaseTemp(n);
@@ -225,7 +229,9 @@ pub fn rmsNorm(x: Tensor, weight: Tensor, eps: f64, axis: i32) Error!Tensor {
     defer ops.releaseTemp(m);
     const e = try ops.scalarLike(m, eps);
     defer ops.releaseTemp(e);
-    const den = try ops.sqrt(try ops.add(m, e));
+    const me = try ops.add(m, e);
+    defer ops.releaseTemp(me);
+    const den = try ops.sqrt(me);
     defer ops.releaseTemp(den);
     const n = try ops.div(x, den);
     defer ops.releaseTemp(n);

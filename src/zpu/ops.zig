@@ -795,6 +795,25 @@ fn reduceOutDType(comptime kind: ReduceKind, in: DType) Error!DType {
 }
 
 fn reduceOp(comptime kind: ReduceKind, x0: Tensor, axis: i32, keepdims: bool) Error!Tensor {
+    // Handle empty tensors: return identity element
+    if (x0.numel() == 0) {
+        const mask = try axesMaskOf(x0, axis);
+        const out_shape = reduceOutShape(x0, mask, keepdims);
+        const odt = try reduceOutDType(kind, x0.dt);
+        const identity: f64 = switch (kind) {
+            .sum => 0.0,
+            .prod => 1.0,
+            .max => -std.math.inf(f64),
+            .min => std.math.inf(f64),
+            .any => 0.0,
+            .all => 1.0,
+        };
+        var out = try Tensor.full(out_shape, odt, identity);
+        out.batch_depth = x0.batch_depth;
+        const attrs = (Attrs{ .axis = axis }).withKeepDims(keepdims);
+        return finish(primOfReduce(kind), &.{x0}, out, attrs);
+    }
+    
     var x = x0;
     var pred_tmp: ?Tensor = null;
     defer if (pred_tmp) |p| releaseTemp(p);
