@@ -15,9 +15,9 @@ zig build doc      # docs/out/ に HTML を生成
 依存関係は一方通行で、下層は上層を知らない:
 
 ```
-zpu  ←  zgf  ←  zui
- ↑                 ↑
- └── zbackend ─────┘
+zpu  ←  zgf  ←  zui  ←  zapp
+ ↑                 ↑        ↑
+ └── zbackend ─────┘────────┘
 ```
 
 | | 中身 | 状態 |
@@ -25,10 +25,11 @@ zpu  ←  zgf  ←  zui
 | `zpu` | JAX の立ち位置: N 次元配列・自動微分・関数変換・実行計画。**純粋な数値計算ライブラリ。GPU バックエンドに依存しない** | 中核完成 (M0–M4) |
 | `zbackend` | WebGPU / Metal / Vulkan / DirectX 12 を dlopen で扱うバックエンド層。`zpu` とは独立 | インターフェース完成 (M7) |
 | `zgf` | 汎用グラフィックライブラリ。`zpu` のテンソルを使い、必要に応じて `zbackend` で GPU 加速 | 立ち上げ中 (M8) |
-| `zui` | 2D UI ライブラリ。即時モード API + 保持される表示リスト + 最小の保持状態。`zpu`・`zgf`・`zbackend` を使う | ソフトウェア経路が動作 ([`ZUI_MILESTONES.md`](ZUI_MILESTONES.md)) |
+| `zui` | 2D UI ライブラリ。即時モード API + 保持される表示リスト + 最小の保持状態。`zpu`・`zgf`・`zbackend` を使う | ソフトウェア経路が動作 ([`docs/zui/milestones.md`](docs/zui/milestones.md)) |
+| `zapp` | アプリケーションフレームワーク。ウィンドウ管理・イベント処理・ZUI 統合。Software/X11/Web バックエンド対応、100x100〜4K 可変リサイズ | 動作中 ([`docs/zapp/`](docs/zapp/)) |
 
 計画と進捗は [`MILESTONES.md`](MILESTONES.md)（`zui` は別トラックの
-[`ZUI_MILESTONES.md`](ZUI_MILESTONES.md)）、機能ごとの説明は [`docs/`](docs/) にある。
+[`docs/zui/milestones.md`](docs/zui/milestones.md)）、機能ごとの説明は [`docs/`](docs/) にある。
 
 ## 30 秒でわかる `zpu`
 

@@ -42,15 +42,16 @@ const Library = struct {
     zpu: *std.Build.Module,
     zgf: *std.Build.Module,
     zui: *std.Build.Module,
+    zapp: *std.Build.Module,
 };
 
 fn createLibrary(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, public: bool) Library {
     const add = struct {
         fn one(bb: *std.Build, name: []const u8, path: []const u8, t: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, is_public: bool) *std.Build.Module {
             return if (is_public)
-                bb.addModule(name, .{ .root_source_file = bb.path(path), .target = t, .optimize = opt })
+                bb.addModule(name, .{ .root_source_file = bb.path(path), .target = t, .optimize = opt, .link_libc = true })
             else
-                bb.createModule(.{ .root_source_file = bb.path(path), .target = t, .optimize = opt });
+                bb.createModule(.{ .root_source_file = bb.path(path), .target = t, .optimize = opt, .link_libc = true });
         }
     }.one;
 
@@ -62,7 +63,11 @@ fn createLibrary(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     zui.addImport("zpu", zpu);
     zui.addImport("zgf", zgf);
     zui.addImport("zbackend", backend);
-    return .{ .backend = backend, .zpu = zpu, .zgf = zgf, .zui = zui };
+    const zapp = add(b, "zapp", "src/zapp.zig", target, optimize, public);
+    zapp.addImport("zpu", zpu);
+    zapp.addImport("zgf", zgf);
+    zapp.addImport("zui", zui);
+    return .{ .backend = backend, .zpu = zpu, .zgf = zgf, .zui = zui, .zapp = zapp };
 }
 
 pub fn build(b: *std.Build) void {
@@ -87,16 +92,20 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the ZPU/ZGF test suite");
     const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this string");
 
+    const zapp_mod = lib.zapp;
+
     const imports = [_]std.Build.Module.Import{
         .{ .name = "zpu", .module = zpu_mod },
         .{ .name = "zgf", .module = zgf_mod },
         .{ .name = "zui", .module = zui_mod },
         .{ .name = "zbackend", .module = backend_mod },
+        .{ .name = "zapp", .module = zapp_mod },
     };
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
         .imports = &imports,
     });
     const unit_tests = b.addTest(.{
@@ -200,6 +209,10 @@ pub fn build(b: *std.Build) void {
         .{ .name = "diff-render", .file = "examples/diff_render.zig", .desc = "Differentiable rendering: fit a scene to a drawn target (zpu x zgf)" },
         .{ .name = "ui-demo", .file = "examples/ui_demo.zig", .desc = "ZUI: a scripted UI, rendered headless into a filmstrip" },
         .{ .name = "gpu-probe", .file = "examples/gpu_probe.zig", .desc = "List the graphics backends available on this machine" },
+        .{ .name = "zapp-demo", .file = "examples/zapp_demo.zig", .desc = "ZAPP: Application framework demo" },
+        .{ .name = "resize-test", .file = "examples/resize_test.zig", .desc = "ZAPP: Window resize test (100x100 to 4K)" },
+        .{ .name = "dsl-demo", .file = "examples/dsl_demo.zig", .desc = "ZAPP: Declarative UI DSL demo" },
+        .{ .name = "zgf-render-test", .file = "examples/zgf_render_test.zig", .desc = "ZGF: Rendering test" },
     };
 
     const examples_step = b.step("examples", "Build every example");
@@ -214,15 +227,22 @@ pub fn build(b: *std.Build) void {
                 // when a program links libc; Zig's built-in ELF loader (what the
                 // library itself uses) does not. Programs that talk to real
                 // drivers want libc; the library never needs it.
-                .link_libc = std.mem.eql(u8, ex.name, "gpu-probe"),
+                .link_libc = std.mem.eql(u8, ex.name, "gpu-probe") or std.mem.eql(u8, ex.name, "zapp-demo"),
                 .imports = &.{
                     .{ .name = "zpu", .module = zpu_mod },
                     .{ .name = "zgf", .module = zgf_mod },
                     .{ .name = "zui", .module = zui_mod },
                     .{ .name = "zbackend", .module = backend_mod },
+                    .{ .name = "zapp", .module = zapp_mod },
                 },
             });
             const exe = b.addExecutable(.{ .name = ex.name, .root_module = mod });
+            
+            // Link X11 for zapp-demo on Linux
+            if (std.mem.eql(u8, ex.name, "zapp-demo") and target.result.os.tag == .linux) {
+                mod.linkSystemLibrary("X11", .{});
+            }
+            
             const install = b.addInstallArtifact(exe, .{});
             examples_step.dependOn(&install.step);
             const run = b.addRunArtifact(exe);

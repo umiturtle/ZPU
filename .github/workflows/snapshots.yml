@@ -1,0 +1,136 @@
+# Snapshot generation and visual regression testing.
+#
+# This workflow:
+# 1. Generates PPM/PNG snapshots from DSL demo
+# 2. Compares against reference images in snapshots/ directory
+# 3. Uploads new snapshots as artifacts for visual inspection
+# 4. Detects visual regressions and reports them
+
+name: Snapshots
+
+on:
+  push:
+    branches:
+      - main
+      - "arena/**"
+  pull_request:
+  workflow_dispatch:
+
+env:
+  ZIG_VERSION: 0.17.0
+
+jobs:
+  generate:
+    name: Generate snapshots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Install ImageMagick (for PNG conversion)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends imagemagick
+
+      - name: Generate DSL demo snapshots
+        shell: bash
+        run: zig build run-dsl-demo 2>&1 | tee snapshot.log
+
+      - name: Convert PPM to PNG for easier viewing
+        shell: bash
+        run: |
+          for ppm in snapshots/zapp/dsl/*.ppm; do
+            png="${ppm%.ppm}.png"
+            convert "$ppm" "$png"
+            echo "Converted: $ppm -> $png"
+          done
+
+      - name: Compare with reference snapshots
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "### Snapshot Comparison" >> "$GITHUB_STEP_SUMMARY"
+          
+          # Check for new files (not in git)
+          new_files=$(git ls-files --others --exclude-standard snapshots/ || true)
+          if [ -n "$new_files" ]; then
+            echo "**⚠️ New snapshot files detected:**" >> "$GITHUB_STEP_SUMMARY"
+            echo "$new_files" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          
+          # Check for modified files
+          modified=$(git diff --name-only snapshots/ || true)
+          if [ -n "$modified" ]; then
+            echo "**🔄 Modified snapshots:**" >> "$GITHUB_STEP_SUMMARY"
+            echo "$modified" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          
+          if [ -z "$new_files" ] && [ -z "$modified" ]; then
+            echo "✅ All snapshots match reference" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload PPM snapshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshots-ppm
+          path: snapshots/zapp/dsl/*.ppm
+          if-no-files-found: error
+
+      - name: Upload PNG snapshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshots-png
+          path: snapshots/zapp/dsl/*.png
+          if-no-files-found: error
+
+      - name: Upload snapshot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-log
+          path: snapshot.log
+          if-no-files-found: ignore
+
+  resize-test:
+    name: Resize test snapshots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Run resize tests
+        shell: bash
+        run: zig build run-resize-test 2>&1 | tee resize.log
+
+      - name: Upload resize test snapshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: resize-snapshots
+          path: snapshots/zapp/resize/*.ppm
+          if-no-files-found: error
+
+      - name: Upload resize log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resize-log
+          path: resize.log
+          if-no-files-found: ignore

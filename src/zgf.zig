@@ -238,6 +238,169 @@ pub const Image = struct {
         }
     }
 
+    /// A linear gradient from left to right.
+    pub fn horizontalGradient(self: *Image, left: Color, right: Color) void {
+        const w = self.width();
+        for (0..self.height()) |y| {
+            for (0..w) |x| {
+                const t: f32 = if (w == 1) 0 else @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(w - 1));
+                const color = Color{
+                    .r = left.r + (right.r - left.r) * t,
+                    .g = left.g + (right.g - left.g) * t,
+                    .b = left.b + (right.b - left.b) * t,
+                    .a = left.a + (right.a - left.a) * t,
+                };
+                self.setPixel(@intCast(x), @intCast(y), color);
+            }
+        }
+    }
+
+    /// Draw a filled ellipse using the midpoint algorithm.
+    pub fn drawEllipse(self: *Image, cx: isize, cy: isize, rx: isize, ry: isize, color: Color) void {
+        if (rx <= 0 or ry <= 0) return;
+        var x: isize = 0;
+        var y: isize = ry;
+        const rx2 = rx * rx;
+        const ry2 = ry * ry;
+
+        // Region 1
+        var d1 = ry2 - rx2 * ry + 0.25 * rx2;
+        var dx: isize = 2 * ry2 * x;
+        var dy: isize = 2 * rx2 * y;
+
+        while (dx < dy) {
+            // Draw horizontal lines to fill
+            for (-x..x + 1) |xi| {
+                self.setPixel(cx + xi, cy + y, color);
+                self.setPixel(cx + xi, cy - y, color);
+            }
+            if (d1 < 0) {
+                x += 1;
+                dx += 2 * ry2;
+                d1 += dx + ry2;
+            } else {
+                x += 1;
+                y -= 1;
+                dx += 2 * ry2;
+                dy -= 2 * rx2;
+                d1 += dx - dy + ry2;
+            }
+        }
+
+        // Region 2
+        var d2 = ry2 * (x * x + x) + rx2 * (y - 1) * (y - 1) - rx2 * ry2;
+        while (y >= 0) {
+            for (-x..x + 1) |xi| {
+                self.setPixel(cx + xi, cy + y, color);
+                self.setPixel(cx + xi, cy - y, color);
+            }
+            if (d2 > 0) {
+                y -= 1;
+                dy -= 2 * rx2;
+                d2 += rx2 - dy;
+            } else {
+                y -= 1;
+                x += 1;
+                dx += 2 * ry2;
+                dy -= 2 * rx2;
+                d2 += dx - dy + rx2;
+            }
+        }
+    }
+
+    /// Draw a filled triangle using scanline rendering.
+    pub fn drawTriangle(self: *Image, x0: isize, y0: isize, x1: isize, y1: isize, x2: isize, y2: isize, color: Color) void {
+        // Sort vertices by y coordinate
+        var ax = x0;
+        var ay = y0;
+        var bx = x1;
+        var by = y1;
+        var cx = x2;
+        var cy = y2;
+
+        if (ay > by) {
+            std.mem.swap(isize, &ax, &bx);
+            std.mem.swap(isize, &ay, &by);
+        }
+        if (by > cy) {
+            std.mem.swap(isize, &bx, &cx);
+            std.mem.swap(isize, &by, &cy);
+        }
+        if (ay > by) {
+            std.mem.swap(isize, &ax, &bx);
+            std.mem.swap(isize, &ay, &by);
+        }
+
+        const total_height = cy - ay;
+        if (total_height == 0) return;
+
+        for (0..total_height) |i| {
+            const y = ay + @as(isize, @intCast(i));
+            const second_half = i > @as(usize, @intCast(by - ay)) or by == ay;
+            const segment_height = if (second_half) cy - by else by - ay;
+            if (segment_height == 0) continue;
+
+            const alpha: f32 = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(total_height));
+            const beta: f32 = @as(f32, @floatFromInt(if (second_half) i - @as(usize, @intCast(by - ay)) else i)) / @as(f32, @floatFromInt(segment_height));
+
+            var xa = ax + @as(isize, @intFromFloat(@as(f32, @floatFromInt(bx - ax)) * alpha));
+            var xb = if (second_half) bx + @as(isize, @intFromFloat(@as(f32, @floatFromInt(cx - bx)) * beta)) else ax + @as(isize, @intFromFloat(@as(f32, @floatFromInt(cx - ax)) * alpha));
+
+            if (xa > xb) {
+                std.mem.swap(isize, &xa, &xb);
+            }
+
+            for (@as(usize, @intCast(xa))..@as(usize, @intCast(xb + 1))) |x| {
+                self.setPixel(@intCast(x), y, color);
+            }
+        }
+    }
+
+    /// Draw a checkerboard pattern (useful for testing transparency).
+    pub fn drawCheckerboard(self: *Image, size: usize, color1: Color, color2: Color) void {
+        for (0..self.height()) |y| {
+            for (0..self.width()) |x| {
+                const checker = ((x / size) + (y / size)) % 2;
+                self.setPixel(@intCast(x), @intCast(y), if (checker == 0) color1 else color2);
+            }
+        }
+    }
+
+    /// Composite another image on top with alpha blending.
+    pub fn composite(self: *Image, src: *const Image, dst_x: isize, dst_y: isize) void {
+        if (src.channels() < 4 or self.channels() < 4) return; // Need alpha channel
+        for (0..src.height()) |sy| {
+            for (0..src.width()) |sx| {
+                const dx = dst_x + @as(isize, @intCast(sx));
+                const dy = dst_y + @as(isize, @intCast(sy));
+                if (dx < 0 or dy < 0) continue;
+                if (dx >= @as(isize, @intCast(self.width())) or dy >= @as(isize, @intCast(self.height()))) continue;
+
+                const sr = src.pixels.readF64(src.index(sx, sy, 0));
+                const sg = src.pixels.readF64(src.index(sx, sy, 1));
+                const sb = src.pixels.readF64(src.index(sx, sy, 2));
+                const sa = src.pixels.readF64(src.index(sx, sy, 3));
+
+                const dr = self.pixels.readF64(self.index(@intCast(dx), @intCast(dy), 0));
+                const dg = self.pixels.readF64(self.index(@intCast(dx), @intCast(dy), 1));
+                const db = self.pixels.readF64(self.index(@intCast(dx), @intCast(dy), 2));
+                const da = self.pixels.readF64(self.index(@intCast(dx), @intCast(dy), 3));
+
+                // Alpha blending (src-over)
+                const out_a = sa + da * (1 - sa);
+                if (out_a > 0) {
+                    const out_r = (sr * sa + dr * da * (1 - sa)) / out_a;
+                    const out_g = (sg * sa + dg * da * (1 - sa)) / out_a;
+                    const out_b = (sb * sa + db * da * (1 - sa)) / out_a;
+                    self.pixels.writeF64(self.index(@intCast(dx), @intCast(dy), 0), out_r);
+                    self.pixels.writeF64(self.index(@intCast(dx), @intCast(dy), 1), out_g);
+                    self.pixels.writeF64(self.index(@intCast(dx), @intCast(dy), 2), out_b);
+                    self.pixels.writeF64(self.index(@intCast(dx), @intCast(dy), 3), out_a);
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------------- filters
     //
     // Filters go through `zpu` operations, so they take a `Scope` (or the
@@ -300,6 +463,125 @@ pub const Image = struct {
         const back = try zpu.addScalar(scaled, 0.5);
         defer zpu.releaseTemp(back);
         return zpu.clamp(back, 0, 1);
+    }
+
+    /// Laplacian edge detection (4-connectivity kernel).
+    pub fn laplacian(self: *const Image) Error!zpu.Tensor {
+        const kernel = try zpu.Tensor.fromArray(f32, &.{ 0, 1, 0, 1, -4, 1, 0, 1, 0 }, zpu.Shape.initComptime(&.{ 3, 3 }));
+        defer zpu.releaseTemp(kernel);
+        const lap = try self.convolve2d(kernel);
+        defer zpu.releaseTemp(lap);
+        // Take absolute value for edge magnitude
+        return zpu.abs(lap);
+    }
+
+    /// Emboss filter: creates a 3D lighting effect.
+    pub fn emboss(self: *const Image) Error!zpu.Tensor {
+        const kernel = try zpu.Tensor.fromArray(f32, &.{ -2, -1, 0, -1, 1, 1, 0, 1, 2 }, zpu.Shape.initComptime(&.{ 3, 3 }));
+        defer zpu.releaseTemp(kernel);
+        const emb = try self.convolve2d(kernel);
+        defer zpu.releaseTemp(emb);
+        // Shift to 0..1 range and add base gray
+        const shifted = try zpu.addScalar(emb, 0.5);
+        defer zpu.releaseTemp(shifted);
+        return zpu.clamp(shifted, 0, 1);
+    }
+
+    /// Sepia tone: converts to warm brownish tone.
+    pub fn sepia(self: *const Image) Error!zpu.Tensor {
+        if (self.channels() < 3) return Error.InvalidImage;
+        const w = self.width();
+        const h = self.height();
+        var out = try Image.init(self.alloc, w, h, 3);
+        errdefer out.deinit();
+
+        for (0..h) |y| {
+            for (0..w) |x| {
+                const r = self.pixels.readF64(self.index(x, y, 0));
+                const g = self.pixels.readF64(self.index(x, y, 1));
+                const b = self.pixels.readF64(self.index(x, y, 2));
+
+                // Sepia transformation matrix
+                const out_r = 0.393 * r + 0.769 * g + 0.189 * b;
+                const out_g = 0.349 * r + 0.686 * g + 0.168 * b;
+                const out_b = 0.272 * r + 0.534 * g + 0.131 * b;
+
+                out.pixels.writeF64(out.index(x, y, 0), @min(out_r, 1.0));
+                out.pixels.writeF64(out.index(x, y, 1), @min(out_g, 1.0));
+                out.pixels.writeF64(out.index(x, y, 2), @min(out_b, 1.0));
+            }
+        }
+        return out.pixels;
+    }
+
+    /// Invert colors: `1 - x`.
+    pub fn invert(self: *const Image) Error!zpu.Tensor {
+        const inv = try zpu.subScalar(zpu.neg(self.pixels), -1.0);
+        defer zpu.releaseTemp(inv);
+        return zpu.clamp(inv, 0, 1);
+    }
+
+    /// Binary threshold: pixels > threshold become 1, else 0.
+    pub fn threshold(self: *const Image, t: f32) Error!zpu.Tensor {
+        const c = self.channels();
+        const w = self.width();
+        const h = self.height();
+        var out = try Image.init(self.alloc, w, h, c);
+        errdefer out.deinit();
+
+        for (0..h) |y| {
+            for (0..w) |x| {
+                for (0..c) |ch| {
+                    const v = self.pixels.readF64(self.index(x, y, ch));
+                    out.pixels.writeF64(out.index(x, y, ch), if (v > t) 1.0 else 0.0);
+                }
+            }
+        }
+        return out.pixels;
+    }
+
+    /// Posterize: reduce to N discrete levels per channel.
+    pub fn posterize(self: *const Image, levels: usize) Error!zpu.Tensor {
+        if (levels < 2) return Error.InvalidImage;
+        const c = self.channels();
+        const w = self.width();
+        const h = self.height();
+        var out = try Image.init(self.alloc, w, h, c);
+        errdefer out.deinit();
+
+        const step = 1.0 / @as(f64, @floatFromInt(levels - 1));
+        for (0..h) |y| {
+            for (0..w) |x| {
+                for (0..c) |ch| {
+                    const v = self.pixels.readF64(self.index(x, y, ch));
+                    const quantized = @round(v / step) * step;
+                    out.pixels.writeF64(out.index(x, y, ch), @min(quantized, 1.0));
+                }
+            }
+        }
+        return out.pixels;
+    }
+
+    /// Gamma correction: `x ^ (1/gamma)`.
+    pub fn gamma(self: *const Image, g: f32) Error!zpu.Tensor {
+        if (g <= 0) return Error.InvalidImage;
+        const inv_g = 1.0 / g;
+        const c = self.channels();
+        const w = self.width();
+        const h = self.height();
+        var out = try Image.init(self.alloc, w, h, c);
+        errdefer out.deinit();
+
+        for (0..h) |y| {
+            for (0..w) |x| {
+                for (0..c) |ch| {
+                    const v = self.pixels.readF64(self.index(x, y, ch));
+                    const corrected = std.math.pow(f32, v, inv_g);
+                    out.pixels.writeF64(out.index(x, y, ch), @min(corrected, 1.0));
+                }
+            }
+        }
+        return out.pixels;
     }
 
     /// Separable convolution over the x axis (`axis = 1`) or y axis (`axis = 0`)
@@ -395,12 +677,32 @@ pub const Image = struct {
 
     /// 8 bit sRGB view of the image, `[H, W, C]` bytes.
     pub fn toPixels(self: *const Image, alloc: std.mem.Allocator) Error![]u8 {
-        const n = self.numel();
-        const out = try alloc.alloc(u8, n);
+        const c = self.channels();
+        const w = self.width();
+        const h = self.height();
+        // PPM/PGMは1または3チャンネルのみ
+        const out_c: usize = if (c == 1) 1 else 3;
+        const out = try alloc.alloc(u8, w * h * out_c);
         errdefer alloc.free(out);
-        for (0..n) |i| {
-            const v = self.pixels.readF64(i);
-            out[i] = @intFromFloat(@round(std.math.clamp(v, 0, 1) * 255.0));
+        
+        for (0..h) |y| {
+            for (0..w) |x| {
+                const base = self.index(x, y, 0);
+                const out_base = (y * w + x) * out_c;
+                const r = self.pixels.readF64(base);
+                
+                if (out_c == 1) {
+                    // グレースケール
+                    out[out_base + 0] = @intFromFloat(@round(std.math.clamp(r, 0, 1) * 255.0));
+                } else {
+                    // RGB
+                    const g = if (c >= 3) self.pixels.readF64(base + 1) else r;
+                    const b = if (c >= 3) self.pixels.readF64(base + 2) else r;
+                    out[out_base + 0] = @intFromFloat(@round(std.math.clamp(r, 0, 1) * 255.0));
+                    out[out_base + 1] = @intFromFloat(@round(std.math.clamp(g, 0, 1) * 255.0));
+                    out[out_base + 2] = @intFromFloat(@round(std.math.clamp(b, 0, 1) * 255.0));
+                }
+            }
         }
         return out;
     }
@@ -722,4 +1024,226 @@ test "gaussian kernel is normalised" {
     // symmetric and peaked in the middle
     try std.testing.expectApproxEqAbs(k.readF64(0), k.readF64(6), 1e-12);
     try std.testing.expect(k.readF64(3) > k.readF64(0));
+}
+
+// Additional Image tests
+
+test "Image.init - valid dimensions" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 100, 50, 3);
+    defer img.deinit();
+
+    try std.testing.expectEqual(@as(usize, 100), img.width());
+    try std.testing.expectEqual(@as(usize, 50), img.height());
+    try std.testing.expectEqual(@as(usize, 3), img.channels());
+    try std.testing.expectEqual(@as(usize, 100 * 50 * 3), img.numel());
+}
+
+test "Image.init - zero width fails" {
+    const alloc = std.testing.allocator;
+    const result = Image.init(alloc, 0, 50, 3);
+    try std.testing.expectError(Error.InvalidImage, result);
+}
+
+test "Image.init - zero height fails" {
+    const alloc = std.testing.allocator;
+    const result = Image.init(alloc, 100, 0, 3);
+    try std.testing.expectError(Error.InvalidImage, result);
+}
+
+test "Image.init - invalid channels fails" {
+    const alloc = std.testing.allocator;
+    const result = Image.init(alloc, 100, 50, 2);
+    try std.testing.expectError(Error.InvalidImage, result);
+}
+
+test "Image.init - 1 channel (grayscale)" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 10, 1);
+    defer img.deinit();
+    try std.testing.expectEqual(@as(usize, 1), img.channels());
+}
+
+test "Image.init - 4 channels (RGBA)" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 10, 4);
+    defer img.deinit();
+    try std.testing.expectEqual(@as(usize, 4), img.channels());
+}
+
+test "Image.fill - solid color" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 10, 3);
+    defer img.deinit();
+
+    img.fill(.{ .r = 0.5, .g = 0.5, .b = 0.5 });
+
+    // toPixelsで検証
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // 全ピクセルが0.5（128）になっているはず
+    const expected: u8 = 128;
+    for (pixels) |p| {
+        try std.testing.expectEqual(expected, p);
+    }
+}
+
+test "Image.fill - red" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 5, 5, 3);
+    defer img.deinit();
+
+    img.fill(.{ .r = 1.0, .g = 0.0, .b = 0.0 });
+
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // RGB順で、各ピクセルが [255, 0, 0]
+    try std.testing.expectEqual(@as(u8, 255), pixels[0]); // R
+    try std.testing.expectEqual(@as(u8, 0), pixels[1]); // G
+    try std.testing.expectEqual(@as(u8, 0), pixels[2]); // B
+}
+
+test "Image.setPixel - within bounds" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 10, 3);
+    defer img.deinit();
+
+    img.fill(.{ .r = 0.0, .g = 0.0, .b = 0.0 });
+    img.setPixel(5, 5, .{ .r = 1.0, .g = 1.0, .b = 1.0 });
+
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // ピクセル(5,5)の位置 = (5 * 10 + 5) * 3 = 165
+    const idx = (5 * 10 + 5) * 3;
+    try std.testing.expectEqual(@as(u8, 255), pixels[idx]); // R
+    try std.testing.expectEqual(@as(u8, 255), pixels[idx + 1]); // G
+    try std.testing.expectEqual(@as(u8, 255), pixels[idx + 2]); // B
+}
+
+test "Image.setPixel - negative coordinates ignored" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 10, 3);
+    defer img.deinit();
+
+    img.fill(.{ .r = 0.5, .g = 0.5, .b = 0.5 });
+    img.setPixel(-1, -1, .{ .r = 0.0, .g = 0.0, .b = 0.0 });
+
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // 全ピクセルが0.5（128）のまま
+    for (pixels) |p| {
+        try std.testing.expectEqual(@as(u8, 128), p);
+    }
+}
+
+test "Image.setPixel - out of bounds ignored" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 10, 3);
+    defer img.deinit();
+
+    img.fill(.{ .r = 0.5, .g = 0.5, .b = 0.5 });
+    img.setPixel(10, 10, .{ .r = 0.0, .g = 0.0, .b = 0.0 });
+
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // 全ピクセルが0.5（128）のまま
+    for (pixels) |p| {
+        try std.testing.expectEqual(@as(u8, 128), p);
+    }
+}
+
+test "Image.drawRect - filled rectangle" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 10, 3);
+    defer img.deinit();
+
+    img.fill(.{ .r = 0.0, .g = 0.0, .b = 0.0 });
+    img.drawRect(2, 2, 5, 5, .{ .r = 1.0, .g = 1.0, .b = 1.0 });
+
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // 矩形内のピクセル(3,3) = (3 * 10 + 3) * 3 = 99
+    const idx_inside = (3 * 10 + 3) * 3;
+    try std.testing.expectEqual(@as(u8, 255), pixels[idx_inside]); // R
+
+    // 矩形外のピクセル(0,0) = 0
+    const idx_outside = (0 * 10 + 0) * 3;
+    try std.testing.expectEqual(@as(u8, 0), pixels[idx_outside]); // R
+}
+
+test "Image.toPixels - 4 channels to 3 channels conversion" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 2, 2, 4);
+    defer img.deinit();
+
+    img.fill(.{ .r = 0.5, .g = 0.5, .b = 0.5, .a = 1.0 });
+
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // 4チャンネル → 3チャンネル変換
+    // 2x2イメージ = 4ピクセル × 3チャンネル = 12バイト
+    try std.testing.expectEqual(@as(usize, 12), pixels.len);
+
+    // 全ピクセルが0.5（128）
+    for (pixels) |p| {
+        try std.testing.expectEqual(@as(u8, 128), p);
+    }
+}
+
+test "Image.toPpm - P6 header format" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 20, 3);
+    defer img.deinit();
+
+    const ppm = try img.toPpm(alloc);
+    defer alloc.free(ppm);
+
+    // ヘッダーは "P6\n10 20\n255\n"
+    // ピクセルデータ之前的部分を探す
+    const header_marker = "\n255\n";
+    const header_end = std.mem.indexOf(u8, ppm, header_marker).? + header_marker.len;
+    const header = ppm[0..header_end];
+
+    try std.testing.expectEqualStrings("P6\n10 20\n255\n", header);
+}
+
+test "Image.toPpm - P5 header for grayscale" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 20, 1);
+    defer img.deinit();
+
+    const ppm = try img.toPpm(alloc);
+    defer alloc.free(ppm);
+
+    const header_marker = "\n255\n";
+    const header_end = std.mem.indexOf(u8, ppm, header_marker).? + header_marker.len;
+    const header = ppm[0..header_end];
+
+    try std.testing.expectEqualStrings("P5\n10 20\n255\n", header);
+}
+
+test "Image.toPixels - value clamping" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 1, 1, 3);
+    defer img.deinit();
+
+    // 範囲外の値を設定
+    img.pixels.writeF64(0, 1.5); // > 1.0
+    img.pixels.writeF64(1, -0.5); // < 0.0
+    img.pixels.writeF64(2, 0.5); // 正常
+
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // クランプされる
+    try std.testing.expectEqual(@as(u8, 255), pixels[0]); // 1.5 → 255
+    try std.testing.expectEqual(@as(u8, 0), pixels[1]); // -0.5 → 0
+    try std.testing.expectEqual(@as(u8, 128), pixels[2]); // 0.5 → 128
 }

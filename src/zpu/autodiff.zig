@@ -234,83 +234,166 @@ pub fn contribution(node: *const Node, i: usize, g: Tensor) Error!?Tensor {
         .log => try ops.div(g, a),
         .log1p => blk: {
             const one = try oneLike(a);
+            defer release(one);
             const d = try ops.add(a, one);
+            defer release(d);
             break :blk try ops.div(g, d);
         },
         .sqrt => blk: {
             const two = try scalarLike(a, 2);
+            defer release(two);
             const d = try ops.mul(y, two);
+            defer release(d);
             break :blk try ops.div(g, d);
         },
         .rsqrt => blk: {
             const half = try scalarLike(a, -0.5);
+            defer release(half);
             const gn = try ops.mul(g, half);
-            break :blk try ops.div(try ops.mul(gn, y), a);
+            defer release(gn);
+            const gny = try ops.mul(gn, y);
+            defer release(gny);
+            break :blk try ops.div(gny, a);
         },
         .square => blk: {
             const two = try scalarLike(a, 2);
-            break :blk try ops.mul(g, try ops.mul(two, a));
+            defer release(two);
+            const two_a = try ops.mul(two, a);
+            defer release(two_a);
+            break :blk try ops.mul(g, two_a);
         },
         .recip => blk: {
             const y2 = try ops.square(y);
-            break :blk try ops.neg(try ops.mul(g, y2));
+            defer release(y2);
+            const gy2 = try ops.mul(g, y2);
+            defer release(gy2);
+            break :blk try ops.neg(gy2);
         },
         .cbrt => blk: {
             const three = try scalarLike(a, 3);
-            const d = try ops.mul(three, try ops.square(y));
+            defer release(three);
+            const y2 = try ops.square(y);
+            defer release(y2);
+            const d = try ops.mul(three, y2);
+            defer release(d);
             break :blk try ops.div(g, d);
         },
         .sin => try ops.mul(g, try ops.cos(a)),
         .cos => try ops.neg(try ops.mul(g, try ops.sin(a))),
         .tan => blk: {
             const y2 = try ops.square(y);
+            defer release(y2);
             const one = try oneLike(a);
-            break :blk try ops.mul(g, try ops.add(one, y2));
+            defer release(one);
+            const one_y2 = try ops.add(one, y2);
+            defer release(one_y2);
+            break :blk try ops.mul(g, one_y2);
         },
-        .asin => try ops.div(g, try ops.sqrt(try subOne(try ops.square(a)))),
-        .acos => try ops.neg(try ops.div(g, try ops.sqrt(try subOne(try ops.square(a))))),
+        .asin => blk: {
+            const a2 = try ops.square(a);
+            defer release(a2);
+            const sub = try subOne(a2);
+            defer release(sub);
+            const sq = try ops.sqrt(sub);
+            defer release(sq);
+            break :blk try ops.div(g, sq);
+        },
+        .acos => blk: {
+            const a2 = try ops.square(a);
+            defer release(a2);
+            const sub = try subOne(a2);
+            defer release(sub);
+            const sq = try ops.sqrt(sub);
+            defer release(sq);
+            const div = try ops.div(g, sq);
+            defer release(div);
+            break :blk try ops.neg(div);
+        },
         .atan => blk: {
             const a2 = try ops.square(a);
+            defer release(a2);
             const one = try oneLike(a);
-            break :blk try ops.div(g, try ops.add(one, a2));
+            defer release(one);
+            const one_a2 = try ops.add(one, a2);
+            defer release(one_a2);
+            break :blk try ops.div(g, one_a2);
         },
         .sinh => try ops.mul(g, try ops.cosh(a)),
         .cosh => try ops.mul(g, try ops.sinh(a)),
         .tanh => blk: {
             const one = try oneLike(a);
+            defer release(one);
             const y2 = try ops.square(y);
-            break :blk try ops.mul(g, try ops.sub(one, y2));
+            defer release(y2);
+            const one_y2 = try ops.sub(one, y2);
+            defer release(one_y2);
+            break :blk try ops.mul(g, one_y2);
         },
         .asinh => blk: {
             const a2 = try ops.square(a);
+            defer release(a2);
             const one = try oneLike(a);
-            break :blk try ops.div(g, try ops.sqrt(try ops.add(one, a2)));
+            defer release(one);
+            const one_a2 = try ops.add(one, a2);
+            defer release(one_a2);
+            const sq = try ops.sqrt(one_a2);
+            defer release(sq);
+            break :blk try ops.div(g, sq);
         },
         .acosh => blk: {
             const a2 = try ops.square(a);
+            defer release(a2);
             const one = try oneLike(a);
-            break :blk try ops.div(g, try ops.sqrt(try ops.sub(a2, one)));
+            defer release(one);
+            const a2_one = try ops.sub(a2, one);
+            defer release(a2_one);
+            const sq = try ops.sqrt(a2_one);
+            defer release(sq);
+            break :blk try ops.div(g, sq);
         },
         .atanh => blk: {
             const a2 = try ops.square(a);
-            break :blk try ops.div(g, try subOne(a2));
+            defer release(a2);
+            const sub = try subOne(a2);
+            defer release(sub);
+            break :blk try ops.div(g, sub);
         },
         .erf => blk: {
             const c = try scalarLike(a, 2.0 / @sqrt(std.math.pi));
+            defer release(c);
             const a2 = try ops.square(a);
-            const e = try ops.exp(try ops.neg(a2));
-            break :blk try ops.mul(g, try ops.mul(c, e));
+            defer release(a2);
+            const neg_a2 = try ops.neg(a2);
+            defer release(neg_a2);
+            const e = try ops.exp(neg_a2);
+            defer release(e);
+            const ce = try ops.mul(c, e);
+            defer release(ce);
+            break :blk try ops.mul(g, ce);
         },
         .sigmoid => blk: {
             const one = try oneLike(a);
+            defer release(one);
             const s = try ops.sub(one, y);
-            break :blk try ops.mul(g, try ops.mul(y, s));
+            defer release(s);
+            const ys = try ops.mul(y, s);
+            defer release(ys);
+            break :blk try ops.mul(g, ys);
         },
-        .softplus => try ops.mul(g, try ops.sigmoid(a)),
+        .softplus => blk: {
+            // d/dx softplus(x) = sigmoid(x)
+            const sig = try ops.sigmoid(a);
+            defer release(sig);
+            break :blk try ops.mul(g, sig);
+        },
         .relu => blk: {
             const zero = try scalarLike(a, 0);
+            defer release(zero);
             const pos = try ops.gt(a, zero);
-            break :blk try ops.where(pos, g, try zerosLike(g));
+            defer release(pos);
+            const zeros = try zerosLike(g);
+            defer release(zeros);
+            break :blk try ops.where(pos, g, zeros);
         },
         .floor, .ceil, .round, .trunc, .sign, .isnan, .isinf, .isfinite => null,
 

@@ -1,0 +1,75 @@
+# ZGF rendering tests with visual snapshots.
+#
+# This workflow:
+# 1. Runs ZGF rendering tests (gradient, solid color, rectangles)
+# 2. Generates baseline snapshots for visual verification
+# 3. Uploads results as artifacts
+
+name: ZGF Tests
+
+on:
+  push:
+    branches:
+      - main
+      - "arena/**"
+  pull_request:
+  workflow_dispatch:
+
+env:
+  ZIG_VERSION: 0.17.0
+
+jobs:
+  zgf-render-tests:
+    name: ZGF rendering tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Install ImageMagick
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends imagemagick
+
+      - name: Run ZGF render tests
+        shell: bash
+        run: zig build run-zgf-render-test 2>&1 | tee zgf.log
+
+      - name: Convert to PNG
+        shell: bash
+        run: |
+          for ppm in snapshots/zgf/*.ppm; do
+            png="${ppm%.ppm}.png"
+            convert "$ppm" "$png"
+            echo "Converted: $ppm -> $png"
+          done
+
+      - name: Upload PPM snapshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: zgf-snapshots-ppm
+          path: snapshots/zgf/*.ppm
+          if-no-files-found: error
+
+      - name: Upload PNG snapshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: zgf-snapshots-png
+          path: snapshots/zgf/*.png
+          if-no-files-found: error
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zgf-log
+          path: zgf.log
+          if-no-files-found: ignore
