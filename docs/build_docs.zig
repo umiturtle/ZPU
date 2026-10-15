@@ -263,6 +263,13 @@ fn collectPages(io: Io, arena: Allocator, site: *Site) !void {
 /// the other language, used for the language switcher.
 fn renderSite(io: Io, arena: Allocator, site: *Site, other: *Site) !void {
     const cwd = Io.Dir.cwd();
+    
+    // Write the CSS file once per language (both use the same styles)
+    const css_path = try mk(arena, "{s}/{s}style.css", .{ out_root, site.spec.out_prefix });
+    const css_file = try cwd.createFile(io, css_path, .{});
+    defer css_file.close(io);
+    try css_file.writeStreamingAll(io, style_css);
+    
     for (site.pages.items) |*page| {
         const ctx = Ctx{
             .arena = arena,
@@ -816,39 +823,303 @@ fn depthPrefix(arena: Allocator, out_name: []const u8) ![]const u8 {
 }
 
 const style_css =
-    \\:root { color-scheme: light dark; --fg: #1b1f23; --bg: #fff; --accent: #0b6bcb; --muted: #667085; --code: #f4f6f8; }
-    \\@media (prefers-color-scheme: dark) { :root { --fg: #e6e8eb; --bg: #14171a; --accent: #6db2ff; --muted: #9aa4b2; --code: #1e242a; } }
+    \\:root {
+    \\    color-scheme: light dark;
+    \\    --fg: #1b1f23;
+    \\    --bg: #ffffff;
+    \\    --bg-secondary: #f6f8fa;
+    \\    --accent: #0b6bcb;
+    \\    --accent-hover: #0550ae;
+    \\    --muted: #667085;
+    \\    --code: #f4f6f8;
+    \\    --border: #d0d7de;
+    \\    --shadow: rgba(31, 35, 40, 0.08);
+    \\}
+    \\@media (prefers-color-scheme: dark) {
+    \\    :root {
+    \\        --fg: #e6e8eb;
+    \\        --bg: #0d1117;
+    \\        --bg-secondary: #161b22;
+    \\        --accent: #58a6ff;
+    \\        --accent-hover: #79c0ff;
+    \\        --muted: #8b949e;
+    \\        --code: #161b22;
+    \\        --border: #30363d;
+    \\        --shadow: rgba(0, 0, 0, 0.3);
+    \\    }
+    \\}
     \\* { box-sizing: border-box; }
-    \\body { margin: 0; font: 16px/1.65 -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; color: var(--fg); background: var(--bg); }
-    \\header { padding: .8rem 1.2rem; border-bottom: 1px solid #8883; display: flex; gap: .6rem; align-items: baseline; }
-    \\header .brand { font-weight: 700; font-size: 1.2rem; color: var(--accent); text-decoration: none; }
-    \\header .sub { color: var(--muted); font-size: .85rem; }
-    \\header .lang { margin-left: auto; font-size: .85rem; }
-    \\header .lang a { margin-left: .4rem; }
-    \\.layout { display: flex; align-items: flex-start; }
-    \\aside { flex: 0 0 15rem; padding: 1rem; border-right: 1px solid #8883; position: sticky; top: 0; max-height: 100vh; overflow: auto; }
-    \\aside h4 { margin: 1rem 0 .2rem; font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
-    \\aside ul { list-style: none; margin: 0; padding: 0; font-size: .92rem; }
-    \\aside li { padding: .1rem 0; }
-    \\aside a { color: inherit; text-decoration: none; }
-    \\aside li.here > a { color: var(--accent); font-weight: 600; }
-    \\main { padding: 1.2rem 2rem 4rem; max-width: 56rem; }
-    \\h1 { font-size: 1.8rem; } h2 { margin-top: 2rem; border-bottom: 1px solid #8883; padding-bottom: .2rem; }
-    \\h3 { margin-top: 1.4rem; }
-    \\a { color: var(--accent); }
-    \\code { background: var(--code); padding: .1rem .3rem; border-radius: 4px; font-size: .9em; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
-    \\pre { background: var(--code); padding: .8rem 1rem; border-radius: 8px; overflow: auto; }
-    \\pre code { background: none; padding: 0; }
-    \\table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .93rem; }
-    \\th, td { border: 1px solid #8884; padding: .35rem .6rem; text-align: left; vertical-align: top; }
-    \\th { background: var(--code); }
-    \\nav.toc { background: var(--code); padding: .6rem 1rem; border-radius: 8px; font-size: .92rem; }
-    \\nav.toc ul { margin: .3rem 0 0; padding-left: 1.2rem; } nav.toc li.l3 { margin-left: 1rem; }
-    \\.src { color: var(--muted); font-size: .85rem; }
-    \\.hint { color: var(--muted); font-size: .85rem; }
-    \\.decl { margin: 1rem 0; border-left: 3px solid var(--accent); padding-left: .8rem; }
-    \\.decl pre.sig { margin: 0 0 .3rem; }
-    \\.decl .doc > :first-child { margin-top: 0; }
-    \\.missing { color: #b42318; }
-    \\footer { padding: 1rem 2rem; color: var(--muted); font-size: .85rem; border-top: 1px solid #8883; }
+    \\html { scroll-behavior: smooth; }
+    \\body {
+    \\    margin: 0;
+    \\    font: 16px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+    \\    color: var(--fg);
+    \\    background: var(--bg);
+    \\    font-feature-settings: "kern" 1, "liga" 1;
+    \\    -webkit-font-smoothing: antialiased;
+    \\    -moz-osx-font-smoothing: grayscale;
+    \\}
+    \\header {
+    \\    padding: 1rem 1.5rem;
+    \\    border-bottom: 1px solid var(--border);
+    \\    display: flex;
+    \\    gap: 1rem;
+    \\    align-items: center;
+    \\    background: var(--bg-secondary);
+    \\    box-shadow: 0 1px 3px var(--shadow);
+    \\    position: sticky;
+    \\    top: 0;
+    \\    z-index: 100;
+    \\}
+    \\header .brand {
+    \\    font-weight: 700;
+    \\    font-size: 1.3rem;
+    \\    color: var(--accent);
+    \\    text-decoration: none;
+    \\    letter-spacing: -0.02em;
+    \\}
+    \\header .brand:hover { color: var(--accent-hover); }
+    \\header .sub {
+    \\    color: var(--muted);
+    \\    font-size: 0.9rem;
+    \\    font-weight: 400;
+    \\}
+    \\header .lang {
+    \\    margin-left: auto;
+    \\    font-size: 0.9rem;
+    \\}
+    \\header .lang a {
+    \\    margin-left: 0.5rem;
+    \\    padding: 0.3rem 0.8rem;
+    \\    border-radius: 6px;
+    \\    text-decoration: none;
+    \\    color: var(--fg);
+    \\    background: var(--bg);
+    \\    border: 1px solid var(--border);
+    \\    transition: all 0.2s ease;
+    \\}
+    \\header .lang a:hover {
+    \\    background: var(--accent);
+    \\    color: white;
+    \\    border-color: var(--accent);
+    \\}
+    \\.layout {
+    \\    display: flex;
+    \\    align-items: flex-start;
+    \\    min-height: calc(100vh - 60px);
+    \\}
+    \\aside {
+    \\    flex: 0 0 16rem;
+    \\    padding: 1.5rem 1rem;
+    \\    border-right: 1px solid var(--border);
+    \\    position: sticky;
+    \\    top: 60px;
+    \\    height: calc(100vh - 60px);
+    \\    overflow-y: auto;
+    \\    background: var(--bg-secondary);
+    \\}
+    \\aside h4 {
+    \\    margin: 1.2rem 0 0.5rem;
+    \\    font-size: 0.75rem;
+    \\    text-transform: uppercase;
+    \\    letter-spacing: 0.08em;
+    \\    color: var(--muted);
+    \\    font-weight: 600;
+    \\}
+    \\aside ul {
+    \\    list-style: none;
+    \\    margin: 0;
+    \\    padding: 0;
+    \\    font-size: 0.95rem;
+    \\}
+    \\aside li {
+    \\    padding: 0.25rem 0;
+    \\}
+    \\aside a {
+    \\    color: var(--fg);
+    \\    text-decoration: none;
+    \\    display: block;
+    \\    padding: 0.3rem 0.6rem;
+    \\    border-radius: 6px;
+    \\    transition: all 0.15s ease;
+    \\}
+    \\aside a:hover {
+    \\    background: var(--bg);
+    \\    color: var(--accent);
+    \\}
+    \\aside li.here > a {
+    \\    color: var(--accent);
+    \\    font-weight: 600;
+    \\    background: var(--bg);
+    \\}
+    \\main {
+    \\    padding: 2rem 3rem 4rem;
+    \\    max-width: 58rem;
+    \\    flex: 1;
+    \\}
+    \\h1 {
+    \\    font-size: 2.2rem;
+    \\    font-weight: 700;
+    \\    letter-spacing: -0.02em;
+    \\    margin: 0 0 1.5rem;
+    \\    line-height: 1.2;
+    \\}
+    \\h2 {
+    \\    margin-top: 2.5rem;
+    \\    font-size: 1.6rem;
+    \\    font-weight: 600;
+    \\    border-bottom: 2px solid var(--border);
+    \\    padding-bottom: 0.4rem;
+    \\    letter-spacing: -0.01em;
+    \\}
+    \\h3 {
+    \\    margin-top: 1.8rem;
+    \\    font-size: 1.3rem;
+    \\    font-weight: 600;
+    \\}
+    \\h4 {
+    \\    margin-top: 1.4rem;
+    \\    font-size: 1.1rem;
+    \\    font-weight: 600;
+    \\}
+    \\p {
+    \\    margin: 1rem 0;
+    \\    line-height: 1.7;
+    \\}
+    \\a {
+    \\    color: var(--accent);
+    \\    text-decoration: none;
+    \\    border-bottom: 1px solid transparent;
+    \\    transition: border-color 0.2s ease;
+    \\}
+    \\a:hover {
+    \\    border-bottom-color: var(--accent);
+    \\}
+    \\code {
+    \\    background: var(--code);
+    \\    padding: 0.15rem 0.4rem;
+    \\    border-radius: 4px;
+    \\    font-size: 0.9em;
+    \\    font-family: "SF Mono", "Monaco", "Inconsolata", "Fira Code", ui-monospace, monospace;
+    \\    font-feature-settings: "calt" 1;
+    \\}
+    \\pre {
+    \\    background: var(--code);
+    \\    padding: 1rem 1.2rem;
+    \\    border-radius: 8px;
+    \\    overflow: auto;
+    \\    margin: 1.2rem 0;
+    \\    border: 1px solid var(--border);
+    \\    box-shadow: 0 2px 4px var(--shadow);
+    \\}
+    \\pre code {
+    \\    background: none;
+    \\    padding: 0;
+    \\    font-size: 0.9rem;
+    \\    line-height: 1.6;
+    \\}
+    \\table {
+    \\    border-collapse: collapse;
+    \\    width: 100%;
+    \\    margin: 1.5rem 0;
+    \\    font-size: 0.95rem;
+    \\    background: var(--bg);
+    \\    border-radius: 8px;
+    \\    overflow: hidden;
+    \\    box-shadow: 0 1px 3px var(--shadow);
+    \\}
+    \\th, td {
+    \\    border: 1px solid var(--border);
+    \\    padding: 0.6rem 0.9rem;
+    \\    text-align: left;
+    \\    vertical-align: top;
+    \\}
+    \\th {
+    \\    background: var(--bg-secondary);
+    \\    font-weight: 600;
+    \\    color: var(--fg);
+    \\}
+    \\tr:hover {
+    \\    background: var(--bg-secondary);
+    \\}
+    \\nav.toc {
+    \\    background: var(--bg-secondary);
+    \\    padding: 1rem 1.2rem;
+    \\    border-radius: 8px;
+    \\    font-size: 0.95rem;
+    \\    border: 1px solid var(--border);
+    \\    margin: 1.5rem 0;
+    \\}
+    \\nav.toc ul {
+    \\    margin: 0.5rem 0 0;
+    \\    padding-left: 1.4rem;
+    \\}
+    \\nav.toc li {
+    \\    margin: 0.3rem 0;
+    \\}
+    \\nav.toc li.l3 {
+    \\    margin-left: 1.2rem;
+    \\}
+    \\.src {
+    \\    color: var(--muted);
+    \\    font-size: 0.85rem;
+    \\    font-style: italic;
+    \\}
+    \\.hint {
+    \\    color: var(--muted);
+    \\    font-size: 0.9rem;
+    \\    font-style: italic;
+    \\}
+    \\.decl {
+    \\    margin: 1.5rem 0;
+    \\    border-left: 4px solid var(--accent);
+    \\    padding-left: 1rem;
+    \\    background: var(--bg-secondary);
+    \\    padding: 1rem;
+    \\    border-radius: 0 8px 8px 0;
+    \\}
+    \\.decl pre.sig {
+    \\    margin: 0 0 0.5rem;
+    \\    background: var(--code);
+    \\    padding: 0.8rem 1rem;
+    \\    border-radius: 6px;
+    \\}
+    \\.decl .doc > :first-child {
+    \\    margin-top: 0;
+    \\}
+    \\.missing {
+    \\    color: #cf222e;
+    \\    font-weight: 600;
+    \\}
+    \\footer {
+    \\    padding: 1.5rem 3rem;
+    \\    color: var(--muted);
+    \\    font-size: 0.9rem;
+    \\    border-top: 1px solid var(--border);
+    \\    background: var(--bg-secondary);
+    \\    margin-top: 3rem;
+    \\}
+    \\/* Responsive design */
+    \\@media (max-width: 768px) {
+    \\    .layout { flex-direction: column; }
+    \\    aside {
+    \\        flex: none;
+    \\        width: 100%;
+    \\        height: auto;
+    \\        position: static;
+    \\        border-right: none;
+    \\        border-bottom: 1px solid var(--border);
+    \\    }
+    \\    main { padding: 1.5rem; }
+    \\    h1 { font-size: 1.8rem; }
+    \\    h2 { font-size: 1.4rem; }
+    \\    table { font-size: 0.85rem; }
+    \\    th, td { padding: 0.4rem 0.6rem; }
+    \\}
+    \\/* Print styles */
+    \\@media print {
+    \\    header, aside, footer { display: none; }
+    \\    main { max-width: 100%; padding: 0; }
+    \\    pre { white-space: pre-wrap; }
+    \\}
 ;
