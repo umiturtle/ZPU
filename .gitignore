@@ -4,3 +4,4 @@ zig-out/
 *.a
 *.so
 docs/out/
+snapshots/zapp/resize/*.ppm
