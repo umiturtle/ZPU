@@ -9,6 +9,7 @@ test {
     std.testing.refAllDecls(zgf);
     std.testing.refAllDecls(zui);
     std.testing.refAllDecls(zbackend);
+    std.testing.refAllDecls(@import("zapp/coordinates.zig"));
 }
 
 test "library integration" {

@@ -85,6 +85,7 @@ pub const window = @import("zapp/window.zig");
 pub const event = @import("zapp/event.zig");
 pub const app = @import("zapp/app.zig");
 pub const dsl = @import("zapp/dsl.zig");
+pub const coordinates = @import("zapp/coordinates.zig");
 
 // 主要な型の再エクスポート
 pub const Window = window.Window;
@@ -100,6 +101,11 @@ pub const Modifiers = event.Modifiers;
 
 pub const App = app.App;
 pub const AppConfig = app.AppConfig;
+
+// Coordinate types
+pub const VirtualRect = coordinates.VirtualRect;
+pub const PhysicalRect = coordinates.PhysicalRect;
+pub const CoordinateTransform = coordinates.CoordinateTransform;
 pub const Ui = app.Ui;
 
 // バージョン情報
