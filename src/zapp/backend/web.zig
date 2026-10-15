@@ -102,6 +102,25 @@ pub const WebWindow = struct {
     pub fn getFramebuffer(self: *WebWindow) *zgf.Image {
         return &self.framebuffer;
     }
+    
+    pub fn resize(self: *WebWindow, width: u32, height: u32) !void {
+        // サイズを検証
+        if (width < 100 or width > 3840) return error.InvalidWidth;
+        if (height < 100 or height > 2160) return error.InvalidHeight;
+        
+        // Canvasをリサイズ
+        js.canvas_init(@intCast(width), @intCast(height));
+        
+        // 古いフレームバッファを解放
+        self.framebuffer.deinit();
+        
+        // 新しいフレームバッファを作成
+        self.framebuffer = try zgf.Image.init(self.allocator, width, height, 4);
+        
+        // Configを更新
+        self.config.width = width;
+        self.config.height = height;
+    }
 };
 
 // WebAssembly用のエントリポイント

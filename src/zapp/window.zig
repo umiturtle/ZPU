@@ -60,6 +60,9 @@ pub const WindowError = error{
     SurfaceCreationFailed,
     SwapchainCreationFailed,
     PlatformNotSupported,
+    InvalidWidth,
+    InvalidHeight,
+    OutOfMemory,
 };
 
 /// ウィンドウの統一インターフェース
@@ -76,6 +79,7 @@ pub const Window = struct {
         getSize: *const fn (*const anyopaque) struct { width: u32, height: u32 },
         setTitle: *const fn (*anyopaque, []const u8) void,
         getFramebuffer: *const fn (*anyopaque) *zgf.Image,
+        resize: *const fn (*anyopaque, u32, u32) anyerror!void,
     };
     
     /// ウィンドウを初期化
@@ -119,6 +123,21 @@ pub const Window = struct {
     /// レンダリング先の画像を取得
     pub fn getFramebuffer(self: *Window) *zgf.Image {
         return self.vtable.getFramebuffer(self.impl);
+    }
+    
+    /// ウィンドウサイズを変更
+    pub fn resize(self: *Window, width: u32, height: u32) !void {
+        // サイズの検証（100x100 から 3840x2160 (4K) まで）
+        if (width < 100 or width > 3840) {
+            return error.InvalidWidth;
+        }
+        if (height < 100 or height > 2160) {
+            return error.InvalidHeight;
+        }
+        
+        try self.vtable.resize(self.impl, width, height);
+        self.config.width = width;
+        self.config.height = height;
     }
     
     /// ZUIのUIをウィンドウに描画
@@ -187,6 +206,7 @@ const SoftwareWindow = struct {
             .getSize = getSize,
             .setTitle = setTitle,
             .getFramebuffer = getFramebuffer,
+            .resize = resize,
         };
         
         return .{
@@ -227,6 +247,18 @@ const SoftwareWindow = struct {
     fn getFramebuffer(ptr: *anyopaque) *zgf.Image {
         const self: *SoftwareWindow = @ptrCast(@alignCast(ptr));
         return &self.framebuffer;
+    }
+    
+    fn resize(ptr: *anyopaque, width: u32, height: u32) anyerror!void {
+        const self: *SoftwareWindow = @ptrCast(@alignCast(ptr));
+        
+        // 古いフレームバッファを解放
+        self.framebuffer.deinit();
+        
+        // 新しいサイズのフレームバッファを作成
+        self.framebuffer = zgf.Image.init(std.heap.page_allocator, width, height, 4) catch return error.OutOfMemory;
+        self.config.width = width;
+        self.config.height = height;
     }
 };
 
@@ -269,6 +301,7 @@ const WebWindow = struct {
             .getSize = getSize,
             .setTitle = setTitle,
             .getFramebuffer = getFramebuffer,
+            .resize = resize,
         };
         
         return .{
@@ -312,6 +345,11 @@ const WebWindow = struct {
     fn getFramebuffer(ptr: *anyopaque) *zgf.Image {
         const self: *WebWindow = @ptrCast(@alignCast(ptr));
         return self.impl.getFramebuffer();
+    }
+    
+    fn resize(ptr: *anyopaque, width: u32, height: u32) anyerror!void {
+        const self: *WebWindow = @ptrCast(@alignCast(ptr));
+        try self.impl.resize(width, height);
     }
 };
 
@@ -339,6 +377,7 @@ const X11Window = struct {
             .getSize = getSize,
             .setTitle = setTitle,
             .getFramebuffer = getFramebuffer,
+            .resize = resize,
         };
         
         return .{
@@ -383,6 +422,11 @@ const X11Window = struct {
         const self: *X11Window = @ptrCast(@alignCast(ptr));
         return self.impl.getFramebuffer();
     }
+    
+    fn resize(ptr: *anyopaque, width: u32, height: u32) anyerror!void {
+        const self: *X11Window = @ptrCast(@alignCast(ptr));
+        try self.impl.resize(width, height);
+    }
 };
 
 // テスト
@@ -403,4 +447,113 @@ test "SoftwareWindow basic" {
     const fb = window.getFramebuffer();
     try std.testing.expectEqual(@as(usize, 100), fb.width());
     try std.testing.expectEqual(@as(usize, 100), fb.height());
+}
+
+test "SoftwareWindow resize from 100x100 to 4K" {
+    var window = try Window.init(.{
+        .title = "Resize Test",
+        .width = 100,
+        .height = 100,
+        .backend = .software,
+    });
+    defer window.deinit();
+    
+    // 初期サイズを確認
+    {
+        const size = window.getSize();
+        try std.testing.expectEqual(@as(u32, 100), size.width);
+        try std.testing.expectEqual(@as(u32, 100), size.height);
+    }
+    
+    // 小さいサイズにリサイズ
+    try window.resize(200, 150);
+    {
+        const size = window.getSize();
+        try std.testing.expectEqual(@as(u32, 200), size.width);
+        try std.testing.expectEqual(@as(u32, 150), size.height);
+        const fb = window.getFramebuffer();
+        try std.testing.expectEqual(@as(usize, 200), fb.width());
+        try std.testing.expectEqual(@as(usize, 150), fb.height());
+    }
+    
+    // HDサイズにリサイズ
+    try window.resize(1280, 720);
+    {
+        const size = window.getSize();
+        try std.testing.expectEqual(@as(u32, 1280), size.width);
+        try std.testing.expectEqual(@as(u32, 720), size.height);
+        const fb = window.getFramebuffer();
+        try std.testing.expectEqual(@as(usize, 1280), fb.width());
+        try std.testing.expectEqual(@as(usize, 720), fb.height());
+    }
+    
+    // Full HDサイズにリサイズ
+    try window.resize(1920, 1080);
+    {
+        const size = window.getSize();
+        try std.testing.expectEqual(@as(u32, 1920), size.width);
+        try std.testing.expectEqual(@as(u32, 1080), size.height);
+        const fb = window.getFramebuffer();
+        try std.testing.expectEqual(@as(usize, 1920), fb.width());
+        try std.testing.expectEqual(@as(usize, 1080), fb.height());
+    }
+    
+    // 4Kサイズにリサイズ
+    try window.resize(3840, 2160);
+    {
+        const size = window.getSize();
+        try std.testing.expectEqual(@as(u32, 3840), size.width);
+        try std.testing.expectEqual(@as(u32, 2160), size.height);
+        const fb = window.getFramebuffer();
+        try std.testing.expectEqual(@as(usize, 3840), fb.width());
+        try std.testing.expectEqual(@as(usize, 2160), fb.height());
+    }
+    
+    // 再度小さいサイズにリサイズ
+    try window.resize(100, 100);
+    {
+        const size = window.getSize();
+        try std.testing.expectEqual(@as(u32, 100), size.width);
+        try std.testing.expectEqual(@as(u32, 100), size.height);
+    }
+}
+
+test "Window resize validation - too small" {
+    var window = try Window.init(.{
+        .title = "Validation Test",
+        .width = 200,
+        .height = 200,
+        .backend = .software,
+    });
+    defer window.deinit();
+    
+    // 小さすぎるサイズはエラー
+    try std.testing.expectError(error.InvalidWidth, window.resize(50, 200));
+    try std.testing.expectError(error.InvalidHeight, window.resize(200, 50));
+    try std.testing.expectError(error.InvalidWidth, window.resize(50, 50));
+    
+    // サイズが変わっていないことを確認
+    const size = window.getSize();
+    try std.testing.expectEqual(@as(u32, 200), size.width);
+    try std.testing.expectEqual(@as(u32, 200), size.height);
+}
+
+test "Window resize validation - too large" {
+    var window = try Window.init(.{
+        .title = "Validation Test",
+        .width = 200,
+        .height = 200,
+        .backend = .software,
+    });
+    defer window.deinit();
+    
+    // 大きすぎるサイズはエラー
+    try std.testing.expectError(error.InvalidWidth, window.resize(4000, 200));
+    try std.testing.expectError(error.InvalidHeight, window.resize(200, 2200));
+    try std.testing.expectError(error.InvalidWidth, window.resize(4000, 2200));
+    
+    // サイズが変わっていないことを確認
+    const size = window.getSize();
+    try std.testing.expectEqual(@as(u32, 200), size.width);
+    try std.testing.expectEqual(@as(u32, 200), size.height);
 }

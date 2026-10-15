@@ -195,6 +195,55 @@ pub const X11Window = struct {
     pub fn getFramebuffer(self: *X11Window) *zgf.Image {
         return &self.framebuffer;
     }
+    
+    pub fn resize(self: *X11Window, width: u32, height: u32) !void {
+        // サイズを検証
+        if (width < 100 or width > 3840) return error.InvalidWidth;
+        if (height < 100 or height > 2160) return error.InvalidHeight;
+        
+        // X11ウィンドウをリサイズ
+        _ = c.XResizeWindow(self.display, self.window, @intCast(width), @intCast(height));
+        
+        // 古いXImageを破棄
+        if (self.ximage) |img| {
+            img.data = null;
+            _ = c.XDestroyImage(img);
+        }
+        
+        // 新しいXImageを作成
+        const screen = c.DefaultScreen(self.display);
+        const new_ximage = c.XCreateImage(
+            self.display,
+            c.DefaultVisual(self.display, screen),
+            @intCast(c.DefaultDepth(self.display, screen)),
+            c.ZPixmap,
+            0,
+            null,
+            @intCast(width),
+            @intCast(height),
+            32,
+            0,
+        );
+        
+        // 古いフレームバッファを解放
+        self.framebuffer.deinit();
+        
+        // 新しいフレームバッファを作成
+        self.framebuffer = try zgf.Image.init(self.allocator, width, height, 4);
+        
+        // XImageのデータを新しいフレームバッファに割り当て
+        if (new_ximage) |img| {
+            img.data = @ptrCast(self.framebuffer.pixels.flatSlice(f32).?);
+        }
+        
+        self.ximage = new_ximage;
+        
+        // Configを更新
+        self.config.width = width;
+        self.config.height = height;
+        
+        _ = c.XFlush(self.display);
+    }
 };
 
 test "X11 Window basic" {

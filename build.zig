@@ -209,6 +209,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ui-demo", .file = "examples/ui_demo.zig", .desc = "ZUI: a scripted UI, rendered headless into a filmstrip" },
         .{ .name = "gpu-probe", .file = "examples/gpu_probe.zig", .desc = "List the graphics backends available on this machine" },
         .{ .name = "zapp-demo", .file = "examples/zapp_demo.zig", .desc = "ZAPP: Application framework demo" },
+        .{ .name = "resize-test", .file = "examples/resize_test.zig", .desc = "ZAPP: Window resize test (100x100 to 4K)" },
     };
 
     const examples_step = b.step("examples", "Build every example");
@@ -223,7 +224,7 @@ pub fn build(b: *std.Build) void {
                 // when a program links libc; Zig's built-in ELF loader (what the
                 // library itself uses) does not. Programs that talk to real
                 // drivers want libc; the library never needs it.
-                .link_libc = std.mem.eql(u8, ex.name, "gpu-probe") or std.mem.eql(u8, ex.name, "zapp-demo"),
+                .link_libc = std.mem.eql(u8, ex.name, "gpu-probe") or std.mem.eql(u8, ex.name, "zapp-demo") or std.mem.eql(u8, ex.name, "resize-test"),
                 .imports = &.{
                     .{ .name = "zpu", .module = zpu_mod },
                     .{ .name = "zgf", .module = zgf_mod },
@@ -235,7 +236,7 @@ pub fn build(b: *std.Build) void {
             const exe = b.addExecutable(.{ .name = ex.name, .root_module = mod });
             
             // Link X11 for zapp-demo on Linux
-            if (std.mem.eql(u8, ex.name, "zapp-demo") and target.result.os.tag == .linux) {
+            if ((std.mem.eql(u8, ex.name, "zapp-demo") or std.mem.eql(u8, ex.name, "resize-test")) and target.result.os.tag == .linux) {
                 exe.linkSystemLibrary("X11");
             }
             
