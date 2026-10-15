@@ -238,6 +238,25 @@ fn collectPages(io: Io, arena: Allocator, site: *Site) !void {
             "API",
         );
     }
+    // The `zui` sources get their own pages, prefixed: several of them share a
+    // basename with a `zpu` module (`tests.zig`, `types.zig`), and a page per
+    // file is only useful if the URL says which library it came from.
+    if (fileExists(io, "src/zui.zig")) {
+        try source_names.append(arena, "src/zui.zig");
+        const zui_names = listZig(io, arena, "src/zui") catch arena.alloc([]const u8, 0) catch unreachable;
+        std.mem.sort([]const u8, zui_names, {}, lessThanName);
+        for (zui_names) |name| try source_names.append(arena, try mk(arena, "src/zui/{s}", .{name}));
+        for (source_names.items) |src| {
+            if (std.mem.startsWith(u8, src, "src/zui") == false) continue;
+            const base = stripZig(std.fs.path.basename(src));
+            try site.addPage(
+                try mk(arena, "api/zui-{s}.html", .{base}),
+                try mk(arena, "zui:{s}", .{base}),
+                src,
+                "API",
+            );
+        }
+    }
 }
 
 /// Renders every page of `site` and writes it to disk. `other` is the site of
@@ -285,6 +304,14 @@ fn lessThanName(_: void, a: []const u8, b: []const u8) bool {
 
 fn stripMd(name: []const u8) []const u8 {
     return if (std.mem.endsWith(u8, name, ".md")) name[0 .. name.len - 3] else name;
+}
+
+/// Whether a path exists, for the optional parts of the site (this generator
+/// runs against a checkout that may not have every tree).
+fn fileExists(io: Io, path: []const u8) bool {
+    const f = Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    f.close(io);
+    return true;
 }
 
 fn stripZig(name: []const u8) []const u8 {

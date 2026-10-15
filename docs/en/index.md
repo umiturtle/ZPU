@@ -1,7 +1,7 @@
 # ZPU documentation
 
-**A numerical computing library (`zpu`) and a general purpose graphics library
-(`zgf`), both written in Zig.** No external dependencies, the build is a single
+**A numerical computing library (`zpu`), a general purpose graphics library
+(`zgf`) and a 2-D UI library (`zui`), all written in Zig.** No external dependencies, the build is a single
 `zig build`, and the tests, benchmarks and this documentation are all Zig programs.
 
 ```sh
@@ -30,6 +30,10 @@ zig build doc      # regenerate this HTML
   and linear algebra (`linalg`).
 * **`zgf`** — images and drawing. An image *is* a `zpu.Tensor`, so filters are
   ordinary tensor expressions and can be differentiated like anything else.
+* **`zui`** — 2-D UI: an immediate-mode widget API, a retained display list and a
+  minimal retained state (a hybrid, chosen from Zig's properties). An idle frame
+  runs no body at all (~15 ns) and the display list rasterises into a `zgf` image,
+  which is what makes a UI testable.
 * **`zbackend`** — detection and dispatch for WebGPU / Metal / Vulkan / DirectX 12
   through `std.DynLib`, behind one `Kernel` / `Buffer` / `dispatch` interface,
   with the CPU backend always available as the fallback.

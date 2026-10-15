@@ -91,3 +91,7 @@ const mm = try zpu.matmul(a, b);          // バッチ対応: 最後の 2 次元
 * 軸は `i32`。`zpu.AXIS_LAST` は `-1`、`zpu.AXIS_NONE` は「リダクションしない」。
 * リダクションの結果は `keepdims=false` で次元が落ちる。vmap の中で使うときは
   `keepdims=true` の方が事故が少ない。
+* 負の `step` の範囲は NumPy と同じ規則で、**`end` は排他**かつ負の `end` は
+  末尾からの位置を指す。したがって `Range.strided(2, -1, -1)` は空になる
+  （NumPy の `x[2:-1:-1]` と同じ）。軸を逆順に見たいだけなら `flip` が素直で、
+  こちらはコピーせずビューを返す。

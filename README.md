@@ -1,6 +1,6 @@
 # ZPU
 
-**Zig で書いた数値計算ライブラリ (`zpu`) と汎用グラフィックライブラリ (`zgf`)。**
+**Zig で書いた数値計算ライブラリ (`zpu`)・汎用グラフィックライブラリ (`zgf`)・2D UI ライブラリ (`zui`)。**
 Zig 0.17 のみ。外部依存もコード生成もビルド時の Python も無い。すべて `zig build` で完結する。
 
 ```sh
@@ -14,9 +14,11 @@ zig build doc      # docs/out/ に HTML を生成
 | --- | --- | --- |
 | `zpu` | JAX の立ち位置: N 次元配列・自動微分・関数変換・実行計画 | 中核完成 (M0–M4) |
 | `zgf` | 汎用グラフィックライブラリ。`zbackend` を共有して CPU/GPU 両対応へ | 立ち上げ中 (M8) |
+| `zui` | 2D UI ライブラリ。即時モード API + 保持される表示リスト + 最小の保持状態 | ソフトウェア経路が動作 ([`ZUI_MILESTONES.md`](ZUI_MILESTONES.md)) |
 | `zbackend` | WebGPU / Metal / Vulkan / DirectX 12 を dlopen で扱うバックエンド層 | インターフェース完成 (M7) |
 
-計画と進捗は [`MILESTONES.md`](MILESTONES.md)、機能ごとの説明は [`docs/`](docs/) にある。
+計画と進捗は [`MILESTONES.md`](MILESTONES.md)（`zui` は別トラックの
+[`ZUI_MILESTONES.md`](ZUI_MILESTONES.md)）、機能ごとの説明は [`docs/`](docs/) にある。
 
 ## 30 秒でわかる `zpu`
 
