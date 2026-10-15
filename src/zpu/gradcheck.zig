@@ -79,8 +79,8 @@ pub const Report = struct {
             return;
         }
         try w.print("gradcheck: {d} of {d} derivatives disagree; worst is arg {d}, element {d}: analytic {e}, numeric {e} (abs {e})\n", .{
-            self.mismatched, self.compared, self.worst_arg, self.worst_index,
-            self.analytic,        self.numeric,   self.max_abs_error,
+            self.mismatched, self.compared, self.worst_arg,     self.worst_index,
+            self.analytic,   self.numeric,  self.max_abs_error,
         });
     }
 };

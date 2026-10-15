@@ -457,8 +457,8 @@ test "gradient table: linear algebra" {
     // A fixed symmetric positive definite matrix: `solve`, `inv` and `det` all
     // want a well conditioned input, so a failure cannot be a numerical accident.
     const spd = [_]f64{
-        4.0, 1.0, 0.5,
-        1.0, 3.0, 0.25,
+        4.0, 1.0,  0.5,
+        1.0, 3.0,  0.25,
         0.5, 0.25, 2.0,
     };
 
@@ -680,7 +680,6 @@ test "gradient table: discrete ops really do have a zero gradient" {
     try h.finish("discrete ops");
 }
 
-
 test "gradient table: forward and reverse mode agree on the same number" {
     // `jvp` is reverse-over-reverse internally, so this is also a check that the
     // nested tape lands on the gradient of the gradient rather than on something
@@ -745,7 +744,10 @@ test "jacobian: the rows are the per-output gradients" {
     const x = try Tensor.fromArray(f64, &.{ 2, 3 }, try Shape.init(&.{ 2, 1 }));
     var args = [_]Tensor{x};
     const jac = try zpu.jacobian(alloc, F.call, null, &args, 0);
-    defer { var jj = jac; jj.deinit(); }
+    defer {
+        var jj = jac;
+        jj.deinit();
+    }
     try std.testing.expectEqual(@as(usize, 6), jac.numel());
     try std.testing.expectApproxEqAbs(@as(f64, 4), jac.readF64(0), 1e-10);
     try std.testing.expectApproxEqAbs(@as(f64, 0), jac.readF64(1), 1e-10);
@@ -776,7 +778,10 @@ test "hessian: the Hessian of a quadratic is its matrix" {
     const x = try Tensor.fromArray(f64, &.{ 1, 2 }, try Shape.init(&.{2}));
     var args = [_]Tensor{x};
     const h = try zpu.hessian(alloc, F.call, null, &args);
-    defer { var hh = h; hh.deinit(); }
+    defer {
+        var hh = h;
+        hh.deinit();
+    }
     try std.testing.expectEqual(@as(usize, 4), h.numel());
     try std.testing.expectApproxEqAbs(@as(f64, 3), h.readF64(0), 1e-8);
     try std.testing.expectApproxEqAbs(@as(f64, 1), h.readF64(1), 1e-8);

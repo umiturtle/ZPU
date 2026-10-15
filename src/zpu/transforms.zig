@@ -502,4 +502,3 @@ pub fn jacobian(
 
     return jac.retain();
 }
-
