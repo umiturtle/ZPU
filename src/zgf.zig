@@ -690,11 +690,18 @@ pub const Image = struct {
                 const base = self.index(x, y, 0);
                 const out_base = (y * w + x) * out_c;
                 const r = self.pixels.readF64(base);
-                const g = if (c >= 3) self.pixels.readF64(base + 1) else r;
-                const b = if (c >= 3) self.pixels.readF64(base + 2) else r;
-                out[out_base + 0] = @intFromFloat(@round(std.math.clamp(r, 0, 1) * 255.0));
-                out[out_base + 1] = @intFromFloat(@round(std.math.clamp(g, 0, 1) * 255.0));
-                out[out_base + 2] = @intFromFloat(@round(std.math.clamp(b, 0, 1) * 255.0));
+                
+                if (out_c == 1) {
+                    // グレースケール
+                    out[out_base + 0] = @intFromFloat(@round(std.math.clamp(r, 0, 1) * 255.0));
+                } else {
+                    // RGB
+                    const g = if (c >= 3) self.pixels.readF64(base + 1) else r;
+                    const b = if (c >= 3) self.pixels.readF64(base + 2) else r;
+                    out[out_base + 0] = @intFromFloat(@round(std.math.clamp(r, 0, 1) * 255.0));
+                    out[out_base + 1] = @intFromFloat(@round(std.math.clamp(g, 0, 1) * 255.0));
+                    out[out_base + 2] = @intFromFloat(@round(std.math.clamp(b, 0, 1) * 255.0));
+                }
             }
         }
         return out;
@@ -1017,4 +1024,226 @@ test "gaussian kernel is normalised" {
     // symmetric and peaked in the middle
     try std.testing.expectApproxEqAbs(k.readF64(0), k.readF64(6), 1e-12);
     try std.testing.expect(k.readF64(3) > k.readF64(0));
+}
+
+// Additional Image tests
+
+test "Image.init - valid dimensions" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 100, 50, 3);
+    defer img.deinit();
+
+    try std.testing.expectEqual(@as(usize, 100), img.width());
+    try std.testing.expectEqual(@as(usize, 50), img.height());
+    try std.testing.expectEqual(@as(usize, 3), img.channels());
+    try std.testing.expectEqual(@as(usize, 100 * 50 * 3), img.numel());
+}
+
+test "Image.init - zero width fails" {
+    const alloc = std.testing.allocator;
+    const result = Image.init(alloc, 0, 50, 3);
+    try std.testing.expectError(Error.InvalidImage, result);
+}
+
+test "Image.init - zero height fails" {
+    const alloc = std.testing.allocator;
+    const result = Image.init(alloc, 100, 0, 3);
+    try std.testing.expectError(Error.InvalidImage, result);
+}
+
+test "Image.init - invalid channels fails" {
+    const alloc = std.testing.allocator;
+    const result = Image.init(alloc, 100, 50, 2);
+    try std.testing.expectError(Error.InvalidImage, result);
+}
+
+test "Image.init - 1 channel (grayscale)" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 10, 1);
+    defer img.deinit();
+    try std.testing.expectEqual(@as(usize, 1), img.channels());
+}
+
+test "Image.init - 4 channels (RGBA)" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 10, 4);
+    defer img.deinit();
+    try std.testing.expectEqual(@as(usize, 4), img.channels());
+}
+
+test "Image.fill - solid color" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 10, 3);
+    defer img.deinit();
+
+    img.fill(.{ .r = 0.5, .g = 0.5, .b = 0.5 });
+
+    // toPixelsで検証
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // 全ピクセルが0.5（128）になっているはず
+    const expected: u8 = 128;
+    for (pixels) |p| {
+        try std.testing.expectEqual(expected, p);
+    }
+}
+
+test "Image.fill - red" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 5, 5, 3);
+    defer img.deinit();
+
+    img.fill(.{ .r = 1.0, .g = 0.0, .b = 0.0 });
+
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // RGB順で、各ピクセルが [255, 0, 0]
+    try std.testing.expectEqual(@as(u8, 255), pixels[0]); // R
+    try std.testing.expectEqual(@as(u8, 0), pixels[1]); // G
+    try std.testing.expectEqual(@as(u8, 0), pixels[2]); // B
+}
+
+test "Image.setPixel - within bounds" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 10, 3);
+    defer img.deinit();
+
+    img.fill(.{ .r = 0.0, .g = 0.0, .b = 0.0 });
+    img.setPixel(5, 5, .{ .r = 1.0, .g = 1.0, .b = 1.0 });
+
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // ピクセル(5,5)の位置 = (5 * 10 + 5) * 3 = 165
+    const idx = (5 * 10 + 5) * 3;
+    try std.testing.expectEqual(@as(u8, 255), pixels[idx]); // R
+    try std.testing.expectEqual(@as(u8, 255), pixels[idx + 1]); // G
+    try std.testing.expectEqual(@as(u8, 255), pixels[idx + 2]); // B
+}
+
+test "Image.setPixel - negative coordinates ignored" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 10, 3);
+    defer img.deinit();
+
+    img.fill(.{ .r = 0.5, .g = 0.5, .b = 0.5 });
+    img.setPixel(-1, -1, .{ .r = 0.0, .g = 0.0, .b = 0.0 });
+
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // 全ピクセルが0.5（128）のまま
+    for (pixels) |p| {
+        try std.testing.expectEqual(@as(u8, 128), p);
+    }
+}
+
+test "Image.setPixel - out of bounds ignored" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 10, 3);
+    defer img.deinit();
+
+    img.fill(.{ .r = 0.5, .g = 0.5, .b = 0.5 });
+    img.setPixel(10, 10, .{ .r = 0.0, .g = 0.0, .b = 0.0 });
+
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // 全ピクセルが0.5（128）のまま
+    for (pixels) |p| {
+        try std.testing.expectEqual(@as(u8, 128), p);
+    }
+}
+
+test "Image.drawRect - filled rectangle" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 10, 3);
+    defer img.deinit();
+
+    img.fill(.{ .r = 0.0, .g = 0.0, .b = 0.0 });
+    img.drawRect(2, 2, 5, 5, .{ .r = 1.0, .g = 1.0, .b = 1.0 });
+
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // 矩形内のピクセル(3,3) = (3 * 10 + 3) * 3 = 99
+    const idx_inside = (3 * 10 + 3) * 3;
+    try std.testing.expectEqual(@as(u8, 255), pixels[idx_inside]); // R
+
+    // 矩形外のピクセル(0,0) = 0
+    const idx_outside = (0 * 10 + 0) * 3;
+    try std.testing.expectEqual(@as(u8, 0), pixels[idx_outside]); // R
+}
+
+test "Image.toPixels - 4 channels to 3 channels conversion" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 2, 2, 4);
+    defer img.deinit();
+
+    img.fill(.{ .r = 0.5, .g = 0.5, .b = 0.5, .a = 1.0 });
+
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // 4チャンネル → 3チャンネル変換
+    // 2x2イメージ = 4ピクセル × 3チャンネル = 12バイト
+    try std.testing.expectEqual(@as(usize, 12), pixels.len);
+
+    // 全ピクセルが0.5（128）
+    for (pixels) |p| {
+        try std.testing.expectEqual(@as(u8, 128), p);
+    }
+}
+
+test "Image.toPpm - P6 header format" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 20, 3);
+    defer img.deinit();
+
+    const ppm = try img.toPpm(alloc);
+    defer alloc.free(ppm);
+
+    // ヘッダーは "P6\n10 20\n255\n"
+    // ピクセルデータ之前的部分を探す
+    const header_marker = "\n255\n";
+    const header_end = std.mem.indexOf(u8, ppm, header_marker).? + header_marker.len;
+    const header = ppm[0..header_end];
+
+    try std.testing.expectEqualStrings("P6\n10 20\n255\n", header);
+}
+
+test "Image.toPpm - P5 header for grayscale" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 10, 20, 1);
+    defer img.deinit();
+
+    const ppm = try img.toPpm(alloc);
+    defer alloc.free(ppm);
+
+    const header_marker = "\n255\n";
+    const header_end = std.mem.indexOf(u8, ppm, header_marker).? + header_marker.len;
+    const header = ppm[0..header_end];
+
+    try std.testing.expectEqualStrings("P5\n10 20\n255\n", header);
+}
+
+test "Image.toPixels - value clamping" {
+    const alloc = std.testing.allocator;
+    var img = try Image.init(alloc, 1, 1, 3);
+    defer img.deinit();
+
+    // 範囲外の値を設定
+    img.pixels.writeF64(0, 1.5); // > 1.0
+    img.pixels.writeF64(1, -0.5); // < 0.0
+    img.pixels.writeF64(2, 0.5); // 正常
+
+    const pixels = try img.toPixels(alloc);
+    defer alloc.free(pixels);
+
+    // クランプされる
+    try std.testing.expectEqual(@as(u8, 255), pixels[0]); // 1.5 → 255
+    try std.testing.expectEqual(@as(u8, 0), pixels[1]); // -0.5 → 0
+    try std.testing.expectEqual(@as(u8, 128), pixels[2]); // 0.5 → 128
 }

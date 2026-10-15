@@ -13,6 +13,5 @@ test {
 
 test "library integration" {
     _ = @import("zpu/tests.zig");
-    _ = @import("zgf/tests.zig");
     _ = zbackend;
 }
