@@ -84,6 +84,7 @@ const std = @import("std");
 pub const window = @import("zapp/window.zig");
 pub const event = @import("zapp/event.zig");
 pub const app = @import("zapp/app.zig");
+pub const dsl = @import("zapp/dsl.zig");
 
 // 主要な型の再エクスポート
 pub const Window = window.Window;

@@ -211,6 +211,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "gpu-probe", .file = "examples/gpu_probe.zig", .desc = "List the graphics backends available on this machine" },
         .{ .name = "zapp-demo", .file = "examples/zapp_demo.zig", .desc = "ZAPP: Application framework demo" },
         .{ .name = "resize-test", .file = "examples/resize_test.zig", .desc = "ZAPP: Window resize test (100x100 to 4K)" },
+        .{ .name = "dsl-demo", .file = "examples/dsl_demo.zig", .desc = "ZAPP: Declarative UI DSL demo" },
     };
 
     const examples_step = b.step("examples", "Build every example");
