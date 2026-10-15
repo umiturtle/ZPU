@@ -677,12 +677,25 @@ pub const Image = struct {
 
     /// 8 bit sRGB view of the image, `[H, W, C]` bytes.
     pub fn toPixels(self: *const Image, alloc: std.mem.Allocator) Error![]u8 {
-        const n = self.numel();
-        const out = try alloc.alloc(u8, n);
+        const c = self.channels();
+        const w = self.width();
+        const h = self.height();
+        // PPM/PGMは1または3チャンネルのみ
+        const out_c: usize = if (c == 1) 1 else 3;
+        const out = try alloc.alloc(u8, w * h * out_c);
         errdefer alloc.free(out);
-        for (0..n) |i| {
-            const v = self.pixels.readF64(i);
-            out[i] = @intFromFloat(@round(std.math.clamp(v, 0, 1) * 255.0));
+        
+        for (0..h) |y| {
+            for (0..w) |x| {
+                const base = self.index(x, y, 0);
+                const out_base = (y * w + x) * out_c;
+                const r = self.pixels.readF64(base);
+                const g = if (c >= 3) self.pixels.readF64(base + 1) else r;
+                const b = if (c >= 3) self.pixels.readF64(base + 2) else r;
+                out[out_base + 0] = @intFromFloat(@round(std.math.clamp(r, 0, 1) * 255.0));
+                out[out_base + 1] = @intFromFloat(@round(std.math.clamp(g, 0, 1) * 255.0));
+                out[out_base + 2] = @intFromFloat(@round(std.math.clamp(b, 0, 1) * 255.0));
+            }
         }
         return out;
     }
