@@ -219,14 +219,17 @@ fn layoutContainer(alloc: std.mem.Allocator, c: ContainerNode, dir: Direction, b
     if (c.children.len == 0) return;
     const pad = c.opts.padding;
     const sp = c.opts.spacing;
-    const inner = Rect{ .x = bounds.x + pad, .y = bounds.y + pad, .w = bounds.w - pad * 2, .h = bounds.h - pad * 2 };
+    // innerのサイズを計算（負にならないように）
+    const inner_w: f32 = @max(bounds.w - pad * 2, 0);
+    const inner_h: f32 = @max(bounds.h - pad * 2, 0);
+    const inner = Rect{ .x = bounds.x + pad, .y = bounds.y + pad, .w = inner_w, .h = inner_h };
 
     const default_h: f32 = 32.0;
     const total_spacing = sp * @as(f32, @floatFromInt(c.children.len - 1));
     var child_size: f32 = if (dir == .vertical)
-        (inner.h - total_spacing) / @as(f32, @floatFromInt(c.children.len))
+        (inner_h - total_spacing) / @as(f32, @floatFromInt(c.children.len))
     else
-        (inner.w - total_spacing) / @as(f32, @floatFromInt(c.children.len));
+        (inner_w - total_spacing) / @as(f32, @floatFromInt(c.children.len));
     if (child_size < default_h) child_size = default_h;
 
     var offset: f32 = 0;
@@ -271,55 +274,73 @@ fn renderNode(fb: *zgf.Image, node: Node, rect: Rect) void {
 // --- 個別ウィジェット描画 ---
 
 fn fillRect(fb: *zgf.Image, rect: Rect, color: zgf.Color) void {
-    const fw: f32 = @floatFromInt(fb.width());
-    const fh: f32 = @floatFromInt(fb.height());
-    const rx0: f32 = @max(rect.x, 0);
-    const ry0: f32 = @max(rect.y, 0);
-    const rx1: f32 = @min(rect.x + rect.w, fw);
-    const ry1: f32 = @min(rect.y + rect.h, fh);
-    if (rx0 >= rx1 or ry0 >= ry1) return;
-    const x0: usize = @intFromFloat(rx0);
-    const y0: usize = @intFromFloat(ry0);
-    const x1: usize = @intFromFloat(rx1);
-    const y1: usize = @intFromFloat(ry1);
-    for (y0..y1) |y| for (x0..x1) |x| fb.setPixel(@intCast(x), @intCast(y), color);
+    const fw = fb.width();
+    const fh = fb.height();
+    // 座標を整数に変換（クランプ）
+    const x0: usize = @intFromFloat(@max(rect.x, 0));
+    const y0: usize = @intFromFloat(@max(rect.y, 0));
+    const x1: usize = @intFromFloat(@min(rect.x + rect.w, @as(f32, @floatFromInt(fw))));
+    const y1: usize = @intFromFloat(@min(rect.y + rect.h, @as(f32, @floatFromInt(fh))));
+    if (x0 >= x1 or y0 >= y1) return;
+    // ピクセルを描画
+    for (y0..y1) |y| {
+        for (x0..x1) |x| {
+            fb.setPixel(@intCast(x), @intCast(y), color);
+        }
+    }
 }
 
 fn drawRectBorder(fb: *zgf.Image, rect: Rect, color: zgf.Color) void {
-    const fw: f32 = @floatFromInt(fb.width());
-    const fh: f32 = @floatFromInt(fb.height());
-    const rx0: f32 = @max(rect.x, 0);
-    const ry0: f32 = @max(rect.y, 0);
-    const rx1: f32 = @min(rect.x + rect.w - 1, fw - 1);
-    const ry1: f32 = @min(rect.y + rect.h - 1, fh - 1);
-    if (rx0 > rx1 or ry0 > ry1) return;
-    const x0: usize = @intFromFloat(rx0);
-    const y0: usize = @intFromFloat(ry0);
-    const x1: usize = @intFromFloat(rx1);
-    const y1: usize = @intFromFloat(ry1);
-    for (x0..x1) |x| { fb.setPixel(@intCast(x), @intCast(y0), color); fb.setPixel(@intCast(x), @intCast(y1), color); }
-    for (y0..y1) |y| { fb.setPixel(@intCast(x0), @intCast(y), color); fb.setPixel(@intCast(x1), @intCast(y), color); }
+    const fw = fb.width();
+    const fh = fb.height();
+    const x0: usize = @intFromFloat(@max(rect.x, 0));
+    const y0: usize = @intFromFloat(@max(rect.y, 0));
+    const x1: usize = @intFromFloat(@min(rect.x + rect.w - 1, @as(f32, @floatFromInt(fw - 1))));
+    const y1: usize = @intFromFloat(@min(rect.y + rect.h - 1, @as(f32, @floatFromInt(fh - 1))));
+    if (x0 > x1 or y0 > y1) return;
+    // 上下の水平線
+    for (x0..x1) |x| {
+        fb.setPixel(@intCast(x), @intCast(y0), color);
+        fb.setPixel(@intCast(x), @intCast(y1), color);
+    }
+    // 左右の垂直線
+    for (y0..y1) |y| {
+        fb.setPixel(@intCast(x0), @intCast(y), color);
+        fb.setPixel(@intCast(x1), @intCast(y), color);
+    }
 }
 
 /// 簡易テキストレンダラー（5x7ドット風）
 fn drawText(fb: *zgf.Image, text: []const u8, x: f32, y: f32, color: zgf.Color) void {
-    var cx: f32 = x;
-    const char_w: f32 = 6;
-    const char_h: f32 = 8;
+    var cx: usize = @intFromFloat(@max(x, 0));
+    const cy: usize = @intFromFloat(@max(y, 0));
+    const fw = fb.width();
+    const fh = fb.height();
+    const char_w: usize = 6;
+    const char_h: usize = 7;
     for (text) |ch| {
-        if (ch == ' ') { cx += char_w + 1; continue; }
-        // 各文字をパターンで描画（簡易フォント）
+        if (ch == ' ') {
+            cx += char_w + 1;
+            continue;
+        }
+        // 画面右端を超えたら描画を停止
+        if (cx >= fw) break;
+        // 文字パターンを取得
         const pattern = charPattern(ch);
-        for (0..7) |py| {
+        // 7行 x 5列の文字を描画
+        for (0..char_h) |py| {
             for (0..5) |px| {
                 if (pattern[py] & (@as(u8, 1) << @intCast(4 - px)) != 0) {
-                    fb.setPixel(@intFromFloat(cx + @as(f32, @floatFromInt(px))), @intFromFloat(y + @as(f32, @floatFromInt(py))), color);
+                    const draw_x = cx + px;
+                    const draw_y = cy + py;
+                    if (draw_x < fw and draw_y < fh) {
+                        fb.setPixel(@intCast(draw_x), @intCast(draw_y), color);
+                    }
                 }
             }
         }
         cx += char_w + 1;
     }
-    _ = char_h;
 }
 
 fn charPattern(ch: u8) [7]u8 {
@@ -390,7 +411,9 @@ fn charPattern(ch: u8) [7]u8 {
 }
 
 fn renderLabel(fb: *zgf.Image, text: []const u8, rect: Rect, style: WidgetOpts) void {
-    drawText(fb, text, rect.x + style.font_h * 0.3, rect.y + (rect.h - style.font_h) / 2, style.fg);
+    const x: f32 = rect.x + style.font_h * 0.3;
+    const y: f32 = rect.y + (rect.h - style.font_h) / 2;
+    drawText(fb, text, @max(x, 0), @max(y, 0), style.fg);
 }
 
 fn renderButton(fb: *zgf.Image, text: []const u8, rect: Rect, style: WidgetOpts) void {
@@ -398,24 +421,27 @@ fn renderButton(fb: *zgf.Image, text: []const u8, rect: Rect, style: WidgetOpts)
     drawRectBorder(fb, rect, style.border);
     // テキスト中央配置
     const text_w: f32 = @floatFromInt(text.len * 7);
-    const text_x = rect.x + (rect.w - text_w) / 2;
-    const text_y = rect.y + (rect.h - 8) / 2;
-    drawText(fb, text, text_x, text_y, style.fg);
+    const text_x: f32 = rect.x + (rect.w - text_w) / 2;
+    const text_y: f32 = rect.y + (rect.h - 8) / 2;
+    drawText(fb, text, @max(text_x, 0), @max(text_y, 0), style.fg);
 }
 
 fn renderSlider(fb: *zgf.Image, label_text: []const u8, value: f32, min_val: f32, max_val: f32, rect: Rect, style: WidgetOpts) void {
     const label_w: f32 = @floatFromInt(label_text.len * 7 + 8);
     // ラベル
-    drawText(fb, label_text, rect.x, rect.y + (rect.h - 8) / 2, style.fg);
+    drawText(fb, label_text, @max(rect.x, 0), @max(rect.y + (rect.h - 8) / 2, 0), style.fg);
     // トラック
-    const track_rect = Rect{ .x = rect.x + label_w, .y = rect.y + rect.h / 2 - 3, .w = rect.w - label_w, .h = 6 };
+    const track_x: f32 = rect.x + label_w;
+    const track_y: f32 = rect.y + rect.h / 2 - 3;
+    const track_w: f32 = rect.w - label_w;
+    const track_rect = Rect{ .x = track_x, .y = track_y, .w = track_w, .h = 6 };
     fillRect(fb, track_rect, style.bg);
     // フィル
     const norm = (value - min_val) / (max_val - min_val);
     const fill_w = track_rect.w * norm;
     fillRect(fb, Rect{ .x = track_rect.x, .y = track_rect.y, .w = fill_w, .h = track_rect.h }, style.accent);
     // ハンドル
-    const hx = track_rect.x + fill_w - 4;
+    const hx: f32 = track_rect.x + fill_w - 4;
     fillRect(fb, Rect{ .x = hx, .y = rect.y + 2, .w = 8, .h = rect.h - 4 }, style.fg);
 }
 
@@ -425,15 +451,30 @@ fn renderCheckbox(fb: *zgf.Image, label_text: []const u8, checked: bool, rect: R
     fillRect(fb, box_rect, style.bg);
     drawRectBorder(fb, box_rect, style.border);
     if (checked) {
-        // チェックマーク
-        const cx = box_rect.x + 3;
-        const cy = box_rect.y + 3;
-        for (0..10) |i| {
-            fb.setPixel(@intFromFloat(cx + @as(f32, @floatFromInt(i))), @intFromFloat(cy + @as(f32, @floatFromInt(i))), style.accent);
-            if (i < 6) fb.setPixel(@intFromFloat(cx + @as(f32, @floatFromInt(10 - i))), @intFromFloat(cy + @as(f32, @floatFromInt(i))), style.accent);
+        // チェックマーク（簡易版：斜線）
+        const bx: usize = @intFromFloat(@max(box_rect.x, 0));
+        const by: usize = @intFromFloat(@max(box_rect.y, 0));
+        const bs: usize = 16;
+        const fw = fb.width();
+        const fh = fb.height();
+        for (0..bs) |i| {
+            const px = bx + i;
+            const py = by + i;
+            if (px < fw and py < fh) {
+                fb.setPixel(@intCast(px), @intCast(py), style.accent);
+            }
+        }
+        for (0..bs) |i| {
+            const px = bx + i;
+            const py = by + (bs - 1 - i);
+            if (px < fw and py < fh) {
+                fb.setPixel(@intCast(px), @intCast(py), style.accent);
+            }
         }
     }
-    drawText(fb, label_text, rect.x + box_size + 6, rect.y + (rect.h - 8) / 2, style.fg);
+    const label_x: f32 = rect.x + box_size + 6;
+    const label_y: f32 = rect.y + (rect.h - 8) / 2;
+    drawText(fb, label_text, label_x, label_y, style.fg);
 }
 
 fn renderProgressBar(fb: *zgf.Image, value: f32, rect: Rect, style: WidgetOpts) void {
@@ -447,16 +488,21 @@ fn renderTextInput(fb: *zgf.Image, text: []const u8, placeholder: []const u8, re
     fillRect(fb, rect, style.bg);
     drawRectBorder(fb, rect, style.border);
     if (text.len > 0) {
-        drawText(fb, text, rect.x + 4, rect.y + (rect.h - 8) / 2, style.fg);
+        drawText(fb, text, @max(rect.x + 4, 0), @max(rect.y + (rect.h - 8) / 2, 0), style.fg);
     } else if (placeholder.len > 0) {
-        drawText(fb, placeholder, rect.x + 4, rect.y + (rect.h - 8) / 2, .{ .r = 0.5, .g = 0.5, .b = 0.5, .a = 1 });
+        drawText(fb, placeholder, @max(rect.x + 4, 0), @max(rect.y + (rect.h - 8) / 2, 0), .{ .r = 0.5, .g = 0.5, .b = 0.5, .a = 1 });
     }
 }
 
 fn renderSeparator(fb: *zgf.Image, rect: Rect, style: WidgetOpts) void {
-    const mid_y = rect.y + rect.h / 2;
-    for (@intFromFloat(rect.x)..@intFromFloat(rect.x + rect.w)) |x| {
-        fb.setPixel(@intCast(x), @intFromFloat(mid_y), style.border);
+    const fw = fb.width();
+    const fh = fb.height();
+    const mid_y: usize = @intFromFloat(@max(@min(rect.y + rect.h / 2, @as(f32, @floatFromInt(fh - 1))), 0));
+    const sx: usize = @intFromFloat(@max(rect.x, 0));
+    const ex: usize = @intFromFloat(@min(rect.x + rect.w, @as(f32, @floatFromInt(fw))));
+    if (sx >= ex) return;
+    for (sx..ex) |x| {
+        fb.setPixel(@intCast(x), @intCast(mid_y), style.border);
     }
 }
 
