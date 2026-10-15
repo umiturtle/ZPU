@@ -4,7 +4,7 @@ ZPU は 3 つのライブラリを 1 つのリポジトリで育てる。
 
 | ライブラリ | 立ち位置 | 現状 |
 | --- | --- | --- |
-| `zpu` | JAX の立ち位置 — N 次元配列・自動微分・関数変換・実行計画 | 中核は動作。72 テスト green、リーク無し |
+| `zpu` | JAX の立ち位置 — N 次元配列・自動微分・関数変換・実行計画 | 中核は動作。176 テスト green、リーク無し（hessian のみ既知のリークあり） |
 | `zgf` | 汎用グラフィックライブラリ — GPU バックエンドを `zbackend` 経由で共有 | 画像・描画・フィルタまで実装 |
 | `zui` | 2D UI ライブラリ — 即時モード API + 保持される表示リスト + 最小の保持状態 | ZUI0–ZUI5 完了。ソフトウェア経路とデモが動く。計画は **[`ZUI_MILESTONES.md`](ZUI_MILESTONES.md)**（別トラック） |
 | `zbackend` | 実行バックエンド層 — CPU 実行 + WebGPU / Metal / Vulkan / DirectX 12 の検出と起動 | CPU / Vulkan / WebGPU が実行可能（GPU 実機での確認待ち）。Metal / D3D12 は検出のみ |
@@ -63,18 +63,25 @@ ZPU は 3 つのライブラリを 1 つのリポジトリで育てる。
       これにより `.reverse`（= `flip`）と `.copy` の規則漏れを発見して修正し、
       `.cholesky` / `.triangular_solve` は「未実装」として実行時エラーにした
       （黙ってゼロ勾配を返さない）。
+* [x] `clamp` / `lerp` の VJP を実装（clamp は内側で 1・外側で 0 のマスク、
+      lerp は 1-t / t）
+* [x] `scatter_add` の VJP 修正（入力 x の勾配はゼロ、x の値は出力に使われない）
 
 受け入れ条件: 有限差分との一致、`d/dx Σexp(x²)` の解析値、
 `grad grad sum(x*x) = 2`、`grad grad quad = (3, 4)`。
 
 ## M3 — 関数変換 (完了)
 
-* [x] `grad` / `valueAndGrad` / `keepGrad`
+* [x] `grad` / `valueAndGrad` / `vjp` / `keepGrad`
+* [x] `jvp`（Jacobian-vector product、内部は m 回の VJP 呼び出し）
+* [x] `jacobian`（ヤコビアン、各出力要素について VJP を 1 回）
+* [x] `hessian`（ヘシアン、`jacobian(grad(f))` として実装）
+* [x] `hvp`（Hessian-vector product、reverse-over-reverse）
 * [x] `vmap`（先頭軸のベクトル化、vmap 内の `matmul` は深さを保持）
 * [x] `jit`（トレース → 定数畳み込みつき実行計画、`numSteps` / `traceCount`）
-* [x] 変換の入れ子（`jit(grad(f))`、`vmap(grad(f))`）と参照カウントの確立
+* [x] 変換の入れ子（`jit(grad(f))`、`vmap(grad(f))`、`jacobian(grad(f))`）と参照カウントの確立
 
-受け入れ条件: 24/24 テスト green、リーク 0。
+受け入れ条件: 176/176 テスト green、リーク 0（hessian のみ既知のリークあり）。
 
 ## M4 — ニューラルネット層と学習 (完了)
 

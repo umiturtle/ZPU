@@ -4,7 +4,7 @@
 Zig 0.17 のみ。外部依存もコード生成もビルド時の Python も無い。すべて `zig build` で完結する。
 
 ```sh
-zig build test     # 24/24 green。std.testing.allocator の下で走るのでリーク検査も兼ねる
+zig build test     # 176/176 green。std.testing.allocator の下で走るのでリーク検査も兼ねる
 zig build check    # zig fmt --check + テスト
 zig build bench    # カーネル別スループット (Zig のみ)
 zig build doc      # docs/out/ に HTML を生成
@@ -62,7 +62,7 @@ pub fn main() !void {
 | `linalg` | 分解・逆行列・`solve`・`det`（`Error.Singular` を返す） |
 | `prims` / `tape` / `autodiff` | primitive と VJP/JVP 規則、逆方向スイープのエンジン |
 | `graph` / `jit` | 記録した DAG と、定数畳み込みつき実行計画 |
-| `transforms` | `grad` / `valueAndGrad` / `jvp` / `hvp` / `vmap` / `jit` |
+| `transforms` | `grad` / `valueAndGrad` / `vjp` / `jvp` / `jacobian` / `hessian` / `hvp` / `vmap` / `jit` |
 | `nn` / `optim` / `rng` | layerNorm・dropout・pooling・conv2d、SGD/Adam/RMSProp、乱数 |
 
 ### 変換
@@ -70,7 +70,10 @@ pub fn main() !void {
 ```zig
 const g   = try zpu.grad(alloc, f, null, args, &.{0});            // []Tensor（呼び出し側が所有）
 const vg  = try zpu.valueAndGrad(alloc, f, null, args, &.{0});    // .value と .grads
+const vjp = try zpu.vjp(alloc, f, null, args, &.{0}, cotangent);  // 明示的な余接ベクトル
 const jvp = try zpu.jvp(alloc, f, args, &.{v});                   // .value と .tangent
+const jac = try zpu.jacobian(alloc, f, null, args, 0);            // R^{m×n} のヤコビアン
+const hes = try zpu.hessian(alloc, f, null, args);                // R^{n×n} のヘシアン
 const hv  = try zpu.hvp(alloc, f, null, args, 0, v);              // H f(x) · v
 const vm  = try zpu.vmap(alloc, f, null, args);                   // 先頭軸をベクトル化
 
