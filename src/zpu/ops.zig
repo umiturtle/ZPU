@@ -1960,7 +1960,7 @@ pub fn gather(operand: Tensor, start_indices: Tensor, slice_sizes: []const usize
             }
             
             // Compute destination index in output
-            var dst_flat: usize = batch_idx * slice_numel + flat_slice_idx;
+            const dst_flat: usize = batch_idx * slice_numel + flat_slice_idx;
             
             out.writeF64(dst_flat, op_c.readF64(src_flat));
         }

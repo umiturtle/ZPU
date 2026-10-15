@@ -380,6 +380,12 @@ pub fn contribution(node: *const Node, i: usize, g: Tensor) Error!?Tensor {
             defer release(ys);
             break :blk try ops.mul(g, ys);
         },
+        .softplus => blk: {
+            // d/dx softplus(x) = sigmoid(x)
+            const sig = try ops.sigmoid(a);
+            defer release(sig);
+            break :blk try ops.mul(g, sig);
+        },
         .relu => blk: {
             const zero = try scalarLike(a, 0);
             defer release(zero);

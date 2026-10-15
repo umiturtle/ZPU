@@ -576,7 +576,7 @@ pub const Image = struct {
             for (0..w) |x| {
                 for (0..c) |ch| {
                     const v = self.pixels.readF64(self.index(x, y, ch));
-                    const corrected = @pow(v, inv_g);
+                    const corrected = std.math.pow(f32, v, inv_g);
                     out.pixels.writeF64(out.index(x, y, ch), @min(corrected, 1.0));
                 }
             }

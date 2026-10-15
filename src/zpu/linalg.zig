@@ -489,6 +489,7 @@ pub fn qr(a: Tensor) Error!struct { q: Tensor, r: Tensor } {
     }
     
     // Householder reflections
+    for (0..batch) |b| {
     for (0..k) |i| {
         // Extract column vector
         var v = try std.heap.c_allocator.alloc(f64, m - i);
@@ -516,29 +517,28 @@ pub fn qr(a: Tensor) Error!struct { q: Tensor, r: Tensor } {
         }
         
         // Apply reflection to R: R = R - 2 * v * (v^T * R)
-        for (0..batch) |b| {
-            for (i..n) |j| {
-                var dot: f64 = 0;
-                for (0..m - i) |l| {
-                    dot += v[l] * r.readF64(b * m * n + (i + l) * n + j);
-                }
-                for (0..m - i) |l| {
-                    const idx = b * m * n + (i + l) * n + j;
-                    r.writeF64(idx, r.readF64(idx) - 2.0 * v[l] * dot);
-                }
+        for (i..n) |j| {
+            var dot_val: f64 = 0;
+            for (0..m - i) |l| {
+                dot_val += v[l] * r.readF64(b * m * n + (i + l) * n + j);
             }
-            
-            // Apply reflection to Q: Q = Q - 2 * (Q * v) * v^T
-            for (0..m) |row| {
-                var dot: f64 = 0;
-                for (0..m - i) |l| {
-                    dot += q_data[b * m * m + row * m + (i + l)] * v[l];
-                }
-                for (0..m - i) |l| {
-                    q_data[b * m * m + row * m + (i + l)] -= 2.0 * dot * v[l];
-                }
+            for (0..m - i) |l| {
+                const idx = b * m * n + (i + l) * n + j;
+                r.writeF64(idx, r.readF64(idx) - 2.0 * v[l] * dot_val);
             }
         }
+        
+        // Apply reflection to Q: Q = Q - 2 * (Q * v) * v^T
+        for (0..m) |row| {
+            var dot_val: f64 = 0;
+            for (0..m - i) |l| {
+                dot_val += q_data[b * m * m + row * m + (i + l)] * v[l];
+            }
+            for (0..m - i) |l| {
+                q_data[b * m * m + row * m + (i + l)] -= 2.0 * dot_val * v[l];
+            }
+        }
+    }
     }
     
     // Create Q tensor

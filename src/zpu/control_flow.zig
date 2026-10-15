@@ -5,9 +5,11 @@
 const std = @import("std");
 const tmod = @import("tensor.zig");
 const ops = @import("ops.zig");
+const prims = @import("prims.zig");
 
 pub const Tensor = tmod.Tensor;
 pub const Error = tmod.Error;
+pub const Shape = tmod.Shape;
 pub const releaseTemp = tmod.releaseTemp;
 
 /// Function type for control flow operations.
@@ -70,7 +72,12 @@ pub fn cond(pred: Tensor, true_fn: Fn, false_fn: Fn, operands: []const Tensor) E
 /// );
 /// ```
 pub fn whileLoop(cond_fn: Fn, body_fn: Fn, init_carry: []const Tensor) Error![]Tensor {
-    var carry = init_carry;
+    // Make a mutable copy of init_carry
+    var carry = try std.heap.c_allocator.alloc(Tensor, init_carry.len);
+    errdefer std.heap.c_allocator.free(carry);
+    for (init_carry, 0..) |t, i| {
+        carry[i] = t;
+    }
     var guard: usize = 0;
     const max_iters = 10000;
     
@@ -89,17 +96,18 @@ pub fn whileLoop(cond_fn: Fn, body_fn: Fn, init_carry: []const Tensor) Error![]T
             new_carry[i] = try body_fn(carry);
         }
         
-        // Free old carry (except init values which are owned by caller)
-        if (guard > 0) {
-            for (carry) |*t| t.deinit();
-            std.heap.c_allocator.free(carry);
-        }
+        // Free old carry
+        for (carry) |*t| t.deinit();
+        std.heap.c_allocator.free(carry);
         
         carry = new_carry;
     }
     
     if (guard >= max_iters) {
-        return Error.Overflow;
+        // Free carry before returning error
+        for (carry) |*t| t.deinit();
+        std.heap.c_allocator.free(carry);
+        return Error.NotSupported;
     }
     
     return carry;
@@ -122,7 +130,9 @@ pub fn whileLoop(cond_fn: Fn, body_fn: Fn, init_carry: []const Tensor) Error![]T
 ///     xs,
 /// );
 /// ```
-pub fn scan(f: *const fn (Tensor, Tensor) Error!struct { carry: Tensor, y: Tensor }, init: Tensor, xs: Tensor) Error!struct { final_carry: Tensor, ys: Tensor } {
+pub const ScanResult = struct { carry: Tensor, y: Tensor };
+pub const ScanOutput = struct { final_carry: Tensor, ys: Tensor };
+pub fn scan(f: *const fn (Tensor, Tensor) Error!ScanResult, init: Tensor, xs: Tensor) Error!ScanOutput {
     if (xs.rank() < 1) return Error.ShapeMismatch;
     const seq_len = xs.shape.dims[0];
     
@@ -150,7 +160,7 @@ pub fn scan(f: *const fn (Tensor, Tensor) Error!struct { carry: Tensor, y: Tenso
     }
     
     // Create ys tensor
-    var ys_shape: [32]usize = @splat(0);
+    var ys_shape: [prims.MAX_RANK]usize = @splat(0);
     ys_shape[0] = seq_len;
     for (1..xs.rank()) |i| ys_shape[i] = xs.shape.dims[i];
     var ys = try Tensor.empty(tmod.Shape.fromParts(ys_shape, xs.rank()), xs.dt);
@@ -180,7 +190,7 @@ pub fn foriLoop(lower: i32, upper: i32, body_fn: *const fn (Tensor, Tensor) Erro
     
     var carry = init_carry;
     
-    for (lower..upper) |i| {
+    for (@as(usize, @intCast(lower))..@as(usize, @intCast(upper))) |i| {
         const i_tensor = try Tensor.fromScalarF64(@floatFromInt(i), carry.dtype());
         const new_carry = try body_fn(i_tensor, carry);
         defer i_tensor.deinit();
@@ -196,9 +206,9 @@ pub fn foriLoop(lower: i32, upper: i32, body_fn: *const fn (Tensor, Tensor) Erro
 ///
 /// Example:
 /// ```zig
-/// const result = try switch(index, &.{branch0_fn, branch1_fn, branch2_fn}, operands);
+/// const result = try switchCase(index, &.{branch0_fn, branch1_fn, branch2_fn}, operands);
 /// ```
-pub fn switch(index: Tensor, branches: []const Fn, operands: []const Tensor) Error!Tensor {
+pub fn switchCase(index: Tensor, branches: []const Fn, operands: []const Tensor) Error!Tensor {
     const idx = @as(usize, @intFromFloat(index.readF64(0)));
     if (idx >= branches.len) return Error.ShapeMismatch;
     return branches[idx](operands);
@@ -282,7 +292,7 @@ test "scan basic" {
     const init = try Tensor.fromScalarF64(0.0, .f32);
     
     const result = try scan(struct {
-        fn f(carry: Tensor, x: Tensor) Error!struct { carry: Tensor, y: Tensor } {
+        fn f(carry: Tensor, x: Tensor) Error!ScanResult {
             const new_carry = try ops.add(carry, x);
             return .{ .carry = new_carry, .y = new_carry };
         }
@@ -367,21 +377,21 @@ test "switch basic" {
     // Test index 0: 10 * 2 = 20
     const idx0 = try Tensor.fromScalarF64(0.0, .i32);
     defer idx0.deinit();
-    const result0 = try switch(idx0, &branches, &.{x});
+    const result0 = try switchCase(idx0, &branches, &.{x});
     defer result0.deinit();
     try std.testing.expectApproxEqAbs(@as(f64, 20.0), result0.item(), 1e-6);
     
     // Test index 1: 10 * 3 = 30
     const idx1 = try Tensor.fromScalarF64(1.0, .i32);
     defer idx1.deinit();
-    const result1 = try switch(idx1, &branches, &.{x});
+    const result1 = try switchCase(idx1, &branches, &.{x});
     defer result1.deinit();
     try std.testing.expectApproxEqAbs(@as(f64, 30.0), result1.item(), 1e-6);
     
     // Test index 2: 10 * 4 = 40
     const idx2 = try Tensor.fromScalarF64(2.0, .i32);
     defer idx2.deinit();
-    const result2 = try switch(idx2, &branches, &.{x});
+    const result2 = try switchCase(idx2, &branches, &.{x});
     defer result2.deinit();
     try std.testing.expectApproxEqAbs(@as(f64, 40.0), result2.item(), 1e-6);
 }

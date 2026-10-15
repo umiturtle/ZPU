@@ -49,9 +49,9 @@ fn createLibrary(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     const add = struct {
         fn one(bb: *std.Build, name: []const u8, path: []const u8, t: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, is_public: bool) *std.Build.Module {
             return if (is_public)
-                bb.addModule(name, .{ .root_source_file = bb.path(path), .target = t, .optimize = opt })
+                bb.addModule(name, .{ .root_source_file = bb.path(path), .target = t, .optimize = opt, .link_libc = true })
             else
-                bb.createModule(.{ .root_source_file = bb.path(path), .target = t, .optimize = opt });
+                bb.createModule(.{ .root_source_file = bb.path(path), .target = t, .optimize = opt, .link_libc = true });
         }
     }.one;
 
@@ -105,6 +105,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
         .imports = &imports,
     });
     const unit_tests = b.addTest(.{
@@ -237,7 +238,7 @@ pub fn build(b: *std.Build) void {
             
             // Link X11 for zapp-demo on Linux
             if ((std.mem.eql(u8, ex.name, "zapp-demo") or std.mem.eql(u8, ex.name, "resize-test")) and target.result.os.tag == .linux) {
-                exe.linkSystemLibrary("X11");
+                mod.linkSystemLibrary("X11", .{});
             }
             
             const install = b.addInstallArtifact(exe, .{});

@@ -73,7 +73,7 @@ pub fn fft1d(x: Tensor) Error!Tensor {
     }
     
     // Perform FFT using Cooley-Tukey
-    var output = try std.heap.c_allocator.alloc(Complex, n);
+    const output = try std.heap.c_allocator.alloc(Complex, n);
     defer std.heap.c_allocator.free(output);
     
     fftRecursive(input, output, n);
@@ -116,7 +116,7 @@ pub fn ifft1d(x: Tensor) Error!Tensor {
     }
     
     // Perform FFT (IFFT via conjugation trick)
-    var output = try std.heap.c_allocator.alloc(Complex, num_complex);
+    const output = try std.heap.c_allocator.alloc(Complex, num_complex);
     defer std.heap.c_allocator.free(output);
     
     fftRecursive(input, output, num_complex);
@@ -147,7 +147,7 @@ fn fftRecursive(input: []Complex, output: []Complex, n: usize) void {
     defer std.heap.c_allocator.free(odd_in);
     var even_out = std.heap.c_allocator.alloc(Complex, half) catch unreachable;
     defer std.heap.c_allocator.free(even_out);
-    var odd_out = std.heap.c_allocator.alloc(Complex, half) catch unreachable;
+    const odd_out = std.heap.c_allocator.alloc(Complex, half) catch unreachable;
     defer std.heap.c_allocator.free(odd_out);
     
     // Split into even and odd

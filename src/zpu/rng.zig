@@ -145,8 +145,8 @@ pub const Rng = struct {
         var out = try Tensor.empty(s, dt);
         
         // For a < 1, use the transformation: gamma(a) = gamma(a+1) * U^(1/a)
-        const scale_factor = if (a < 1.0) 1.0 else 0.0;
-        const a_eff = if (a < 1.0) a + 1.0 else a;
+        const scale_factor: f64 = if (a < 1.0) 1.0 else 0.0;
+        const a_eff: f64 = if (a < 1.0) a + 1.0 else a;
         
         for (0..out.numel()) |i| {
             var v: f64 = 0;
@@ -181,7 +181,7 @@ pub const Rng = struct {
             // Apply correction for a < 1
             if (scale_factor > 0.0) {
                 const u = self.nextF64();
-                v *= @pow(u, 1.0 / a);
+                v *= std.math.pow(f64, u, 1.0 / a);
             }
             
             out.writeF64(i, v);
@@ -206,8 +206,8 @@ pub const Rng = struct {
     
     /// Helper: generate a single gamma sample
     fn gammaScalar(self: *Rng, a: f64) !f64 {
-        const scale_factor = if (a < 1.0) 1.0 else 0.0;
-        const a_eff = if (a < 1.0) a + 1.0 else a;
+        const scale_factor: f64 = if (a < 1.0) 1.0 else 0.0;
+        const a_eff: f64 = if (a < 1.0) a + 1.0 else a;
         
         var v: f64 = 0;
         const d = a_eff - 1.0 / 3.0;
@@ -231,7 +231,7 @@ pub const Rng = struct {
         v = d * v;
         if (scale_factor > 0.0) {
             const u = self.nextF64();
-            v *= @pow(u, 1.0 / a);
+            v *= std.math.pow(f64, u, 1.0 / a);
         }
         return v;
     }
