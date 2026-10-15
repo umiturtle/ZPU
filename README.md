@@ -4,18 +4,28 @@
 Zig 0.17 のみ。外部依存もコード生成もビルド時の Python も無い。すべて `zig build` で完結する。
 
 ```sh
-zig build test     # 176/176 green。std.testing.allocator の下で走るのでリーク検査も兼ねる
+zig build test     # 205/205 green。std.testing.allocator の下で走るのでリーク検査も兼ねる
 zig build check    # zig fmt --check + テスト
 zig build bench    # カーネル別スループット (Zig のみ)
 zig build doc      # docs/out/ に HTML を生成
 ```
 
+## ライブラリ構成
+
+依存関係は一方通行で、下層は上層を知らない:
+
+```
+zpu  ←  zgf  ←  zui
+ ↑                 ↑
+ └── zbackend ─────┘
+```
+
 | | 中身 | 状態 |
 | --- | --- | --- |
-| `zpu` | JAX の立ち位置: N 次元配列・自動微分・関数変換・実行計画 | 中核完成 (M0–M4) |
-| `zgf` | 汎用グラフィックライブラリ。`zbackend` を共有して CPU/GPU 両対応へ | 立ち上げ中 (M8) |
-| `zui` | 2D UI ライブラリ。即時モード API + 保持される表示リスト + 最小の保持状態 | ソフトウェア経路が動作 ([`ZUI_MILESTONES.md`](ZUI_MILESTONES.md)) |
-| `zbackend` | WebGPU / Metal / Vulkan / DirectX 12 を dlopen で扱うバックエンド層 | インターフェース完成 (M7) |
+| `zpu` | JAX の立ち位置: N 次元配列・自動微分・関数変換・実行計画。**純粋な数値計算ライブラリ。GPU バックエンドに依存しない** | 中核完成 (M0–M4) |
+| `zbackend` | WebGPU / Metal / Vulkan / DirectX 12 を dlopen で扱うバックエンド層。`zpu` とは独立 | インターフェース完成 (M7) |
+| `zgf` | 汎用グラフィックライブラリ。`zpu` のテンソルを使い、必要に応じて `zbackend` で GPU 加速 | 立ち上げ中 (M8) |
+| `zui` | 2D UI ライブラリ。即時モード API + 保持される表示リスト + 最小の保持状態。`zpu`・`zgf`・`zbackend` を使う | ソフトウェア経路が動作 ([`ZUI_MILESTONES.md`](ZUI_MILESTONES.md)) |
 
 計画と進捗は [`MILESTONES.md`](MILESTONES.md)（`zui` は別トラックの
 [`ZUI_MILESTONES.md`](ZUI_MILESTONES.md)）、機能ごとの説明は [`docs/`](docs/) にある。

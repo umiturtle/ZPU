@@ -65,21 +65,6 @@ fn checkRel(actual: T, expected: []const f64, tol: f64) !void {
 // The eager core
 // =============================================================================
 
-test "the backend layer is reachable and the cpu is always there" {
-    const report = zpu.backends();
-    try std.testing.expect(report.cpu);
-    try std.testing.expect(report.has(.cpu));
-    // `best` never surprises: with no GPU on this machine it is the CPU.
-    const best = report.best();
-    try std.testing.expect(report.has(best));
-    // ...and the whole device surface is re-exported, so a program needs one
-    // import for tensors and kernels alike.
-    _ = zpu.DeviceBuffer;
-    _ = zpu.createDeviceBuffer;
-    _ = zpu.dispatchDeviceBuffers;
-    _ = zpu.setDriverLibrary;
-}
-
 test "elementwise and broadcasting match numpy" {
     try setup();
     var scope = try zpu.Scope.init(alloc);

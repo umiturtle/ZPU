@@ -56,10 +56,8 @@ fn createLibrary(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 
     const backend = add(b, "zbackend", "src/backend.zig", target, optimize, public);
     const zpu = add(b, "zpu", "src/zpu.zig", target, optimize, public);
-    zpu.addImport("zbackend", backend);
     const zgf = add(b, "zgf", "src/zgf.zig", target, optimize, public);
     zgf.addImport("zpu", zpu);
-    zgf.addImport("zbackend", backend);
     const zui = add(b, "zui", "src/zui.zig", target, optimize, public);
     zui.addImport("zpu", zpu);
     zui.addImport("zgf", zgf);

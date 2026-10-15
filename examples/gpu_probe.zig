@@ -11,7 +11,7 @@
 //!    verifies the result.
 const std = @import("std");
 const zpu = @import("zpu");
-const zb = zpu.zbackend;
+const zb = @import("zbackend");
 
 const Io = std.Io;
 

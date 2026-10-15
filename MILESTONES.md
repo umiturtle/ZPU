@@ -1,13 +1,19 @@
 # ZPU / ZGF マイルストーン
 
-ZPU は 3 つのライブラリを 1 つのリポジトリで育てる。
+ZPU は 4 つのライブラリを 1 つのリポジトリで育てる。依存関係は一方通行:
 
-| ライブラリ | 立ち位置 | 現状 |
-| --- | --- | --- |
-| `zpu` | JAX の立ち位置 — N 次元配列・自動微分・関数変換・実行計画 | 中核は動作。176 テスト green、リーク無し（hessian のみ既知のリークあり） |
-| `zgf` | 汎用グラフィックライブラリ — GPU バックエンドを `zbackend` 経由で共有 | 画像・描画・フィルタまで実装 |
-| `zui` | 2D UI ライブラリ — 即時モード API + 保持される表示リスト + 最小の保持状態 | ZUI0–ZUI5 完了。ソフトウェア経路とデモが動く。計画は **[`ZUI_MILESTONES.md`](ZUI_MILESTONES.md)**（別トラック） |
-| `zbackend` | 実行バックエンド層 — CPU 実行 + WebGPU / Metal / Vulkan / DirectX 12 の検出と起動 | CPU / Vulkan / WebGPU が実行可能（GPU 実機での確認待ち）。Metal / D3D12 は検出のみ |
+```
+zpu  ←  zgf  ←  zui
+ ↑                 ↑
+ └── zbackend ─────┘
+```
+
+| ライブラリ | 立ち位置 | 依存 | 現状 |
+| --- | --- | --- | --- |
+| `zpu` | JAX の立ち位置 — N 次元配列・自動微分・関数変換・実行計画 | **依存なし**（純粋な数値計算） | 中核は動作。205 テスト green（hessian のみ既知のリークあり） |
+| `zbackend` | 実行バックエンド層 — CPU 実行 + WebGPU / Metal / Vulkan / DirectX 12 の検出と起動 | **依存なし** | CPU / Vulkan / WebGPU が実行可能（GPU 実機での確認待ち）。Metal / D3D12 は検出のみ |
+| `zgf` | 汎用グラフィックライブラリ | `zpu` | 画像・描画・フィルタまで実装 |
+| `zui` | 2D UI ライブラリ — 即時モード API + 保持される表示リスト + 最小の保持状態 | `zpu` `zgf` `zbackend` | ZUI0–ZUI5 完了。ソフトウェア経路とデモが動く。計画は **[`ZUI_MILESTONES.md`](ZUI_MILESTONES.md)**（別トラック） |
 
 `zui` のマイルストーンはこの表の下ではなく **`ZUI_MILESTONES.md`** にある。
 数値計算の中核はウィジェットの存在を知らないままでいられるし、UI 側は
@@ -31,7 +37,7 @@ ZPU は 3 つのライブラリを 1 つのリポジトリで育てる。
 
 ## M0 — 基盤 (完了)
 
-* [x] Zig 0.17 のビルドスクリプト（モジュールグラフ `zbackend` → `zpu` → `zgf`）
+* [x] Zig 0.17 のビルドスクリプト（モジュールグラフ: `zpu` と `zbackend` は独立、`zgf` → `zpu`、`zui` → `zpu` + `zgf` + `zbackend`）
 * [x] 固定ランク `Shape`（`MAX_RANK` 次元、コンパイル時 shape 構築）
 * [x] 64 バイト整列の参照カウント付き `Buffer`
 * [x] ストライド付き N 次元 `Tensor`、view / コピー / 読み書き
