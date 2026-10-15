@@ -1,15 +1,24 @@
 # zpu benchmark baseline — written by `zig build bench -- --write-baseline`
 # machine specific: re-record after changing CPU, compiler or kernel.
 # format: <case name> <rate>
-add f32 [1M] 7.560983
-mul f64 [1M] 9.457085
-exp f32 [1M] 0.691683
-sum f32 [1M] 1.599372
-matmul f32 512x512x512 3.144934
-matmul f64 256x256x256 3.097307
-batch matmul f32 64x32x32 2.906163
-conv2d f32 1x3x32x32 k3 0.060903
-layerNorm f32 [64,64] 0.365239
-grad MLP f32 (batch 64) 562.932765
-adam step MLP f32 428.594652
-jit(grad MLP) f32 954.116912
+add f32 [1M] 7.274057
+mul f64 [1M] 10.139488
+exp f32 [1M] 0.746255
+sum f32 [1M] 1.570479
+matmul f32 512x512x512 5.768538
+matmul f64 256x256x256 5.136277
+batch matmul f32 64x32x32 5.509016
+conv2d f32 1x3x32x32 k3 0.093296
+layerNorm f32 [64,64] 0.475444
+grad MLP f32 (batch 64) 693.023145
+adam step MLP f32 603.541582
+jit(grad MLP) f32 1120.629405
+ui frame build 320x200 347024.644832
+ui frame idle (reused) 93522850.531593
+ui raster 320x200 46.086119
+ui raster 320x200 @2x 250.295992
+ui frame -> instances 1640344.362741
+ui instance pack 4643302.298184
+ui raster via instances 42.165749
+ui kernel dispatch 66.649171
+ui virtual list 100k rows 1496198.560647

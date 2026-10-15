@@ -36,6 +36,7 @@ pub const autodiff = @import("zpu/autodiff.zig");
 pub const transforms = @import("zpu/transforms.zig");
 pub const nn = @import("zpu/nn.zig");
 pub const optim = @import("zpu/optim.zig");
+pub const gradcheck = @import("zpu/gradcheck.zig");
 pub const rng = @import("zpu/rng.zig");
 
 pub const DType = dtype.DType;
@@ -296,7 +297,9 @@ test {
     _ = @import("zpu/context.zig");
     _ = @import("zpu/dtype.zig");
     _ = @import("zpu/graph.zig");
+    _ = @import("zpu/gradcheck.zig");
     _ = @import("zpu/jit.zig");
+    _ = @import("zpu/kernels.zig");
     _ = @import("zpu/linalg.zig");
     _ = @import("zpu/ops.zig");
     _ = @import("zpu/optim.zig");
@@ -306,5 +309,6 @@ test {
     _ = @import("zpu/shape.zig");
     _ = @import("zpu/tape.zig");
     _ = @import("zpu/tensor.zig");
+    _ = @import("zpu/tests_grad.zig");
     _ = @import("zpu/transforms.zig");
 }

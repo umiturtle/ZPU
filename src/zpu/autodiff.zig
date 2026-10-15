@@ -479,7 +479,19 @@ pub fn contribution(node: *const Node, i: usize, g: Tensor) Error!?Tensor {
         // `reverse` is `flip` along an axis, and both are their own inverse.
         .flip, .reverse => try ops.flip(g, attrs.axis),
         .cumsum => try ops.cumsum(g, attrs.axis, !attrs.reverse()),
-        .lerp, .clamp => null,
+        // `clamp` is 1 strictly inside the bounds and 0 outside; on a bound it
+        // has no derivative and the mask's convention (inside) wins.
+        .clamp => blk: {
+            const lo = try scalarLike(a, @as(f64, @floatFromInt(attrs.starts[0])));
+            const hi = try scalarLike(a, @as(f64, @floatFromInt(attrs.starts[1])));
+            const inside = try ops.logicalAnd(try ops.ge(a, lo), try ops.le(a, hi));
+            break :blk try ops.where(inside, g, try zerosLike(g));
+        },
+        // `a + t (b - a)` weights its two inputs by `1 - t` and `t`.
+        .lerp => blk: {
+            const t = attrs.scalar;
+            break :blk try ops.mulScalar(g, if (i == 0) 1.0 - t else t);
+        },
         .stack_op => blk: {
             // d/dx_j stack = squeeze of the corresponding half
             if (i == 0) break :blk try ops.squeeze(g, attrs.axis);
@@ -619,4 +631,47 @@ test "backward rules compile" {
     const fns = .{ differentiable, reduceToShape, unbroadcast, contribution, seedOnes };
     inline for (fns) |f| _ = &f;
     _ = &Engine.init;
+}
+
+test "the clamp and lerp prims carry a gradient" {
+    const alloc = std.testing.allocator;
+    try @import("context.zig").init(alloc, .{});
+    defer @import("context.zig").deinit();
+    var scope = try tmod.Scope.init(alloc);
+    defer scope.deinit();
+
+    // The eager `ops.clamp`/`ops.lerp` desugar into maximum/minimum and
+    // add/mulScalar, so these two rules are only reachable from a tape that
+    // recorded the prim itself (a replayed plan). They are still rules: a
+    // gradient that silently becomes zero is the worst kind of wrong.
+    const S = @import("shape.zig").Shape;
+    const x = try Tensor.fromArray(f64, &.{ -2, 0.5, 3 }, try S.init(&.{3}));
+    const y = try ops.clamp(x, -1, 1);
+    const g = try Tensor.ones(try S.init(&.{3}), .f64);
+
+    var attrs: Attrs = .{};
+    attrs.starts[0] = -1;
+    attrs.starts[1] = 1;
+    var node = @import("tape.zig").Node{ .prim = .clamp, .n_inputs = 1, .out = y, .attrs = attrs };
+    node.inputs[0] = x;
+
+    const pushed = (try contribution(&node, 0, g)).?;
+    try std.testing.expectEqual(@as(f64, 0), pushed.readF64(0));
+    try std.testing.expectEqual(@as(f64, 1), pushed.readF64(1));
+    try std.testing.expectEqual(@as(f64, 0), pushed.readF64(2));
+
+    // lerp: d/da = 1 - t, d/db = t, elementwise and in that order.
+    const lhs = try Tensor.fromArray(f64, &.{ 1, 2, 3 }, try S.init(&.{3}));
+    const rhs = try Tensor.fromArray(f64, &.{ 4, 5, 6 }, try S.init(&.{3}));
+    const mixed = try ops.lerp(lhs, rhs, 0.25);
+    var lattrs: Attrs = .{};
+    lattrs.scalar = 0.25;
+    var lnode = @import("tape.zig").Node{ .prim = .lerp, .n_inputs = 2, .out = mixed, .attrs = lattrs };
+    lnode.inputs[0] = lhs;
+    lnode.inputs[1] = rhs;
+
+    const da = (try contribution(&lnode, 0, g)).?;
+    const db = (try contribution(&lnode, 1, g)).?;
+    try std.testing.expectEqual(@as(f64, 0.75), da.readF64(1));
+    try std.testing.expectEqual(@as(f64, 0.25), db.readF64(1));
 }

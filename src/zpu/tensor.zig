@@ -376,10 +376,16 @@ pub const Tensor = struct {
             rem /= d;
             off += @as(isize, @intCast(idx)) * self.strides[a];
         }
+        // `flip` and reverse-strided ranges give negative strides, so the walk
+        // above accumulates a *negative* delta: it is measured from the view's
+        // own offset (for a flipped axis that is the last element in memory, and
+        // the walk counts backwards from there). Both terms are isize, and the
+        // element always lands inside the buffer.
+        const at: usize = @intCast(@as(isize, @intCast(self.offset)) + off);
         return switch (self.dt) {
             inline else => |d| switch (d) {
-                .bool => if (self.buf.data(bool)[self.offset + @as(usize, @intCast(off))]) 1 else 0,
-                inline else => scalar.toF64(self.buf.data(DType.Elt(d))[self.offset + @as(usize, @intCast(off))]),
+                .bool => if (self.buf.data(bool)[at]) 1 else 0,
+                inline else => scalar.toF64(self.buf.data(DType.Elt(d))[at]),
             },
         };
     }
