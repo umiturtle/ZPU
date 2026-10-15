@@ -238,6 +238,167 @@ pub fn rmsNorm(x: Tensor, weight: Tensor, eps: f64, axis: i32) Error!Tensor {
     return ops.mul(n, weight);
 }
 
+/// Batch normalization: normalizes over batch and spatial dimensions.
+/// x shape: [N, C, ...] where ... are spatial dims
+/// weight/bias shape: [C]
+/// mean/var shape: [C] (running statistics)
+pub fn batchNorm(x: Tensor, weight: Tensor, bias: Tensor, running_mean: Tensor, running_var: Tensor, eps: f64) Error!Tensor {
+    if (x.rank() < 2) return Error.ShapeMismatch;
+    
+    // Compute mean and variance over batch and spatial dims
+    // For each channel, normalize across all other dimensions
+    const num_channels = x.shape.dims[1];
+    const spatial_size = x.numel() / (x.shape.dims[0] * num_channels);
+    
+    var out = try Tensor.empty(x.shape, x.dt);
+    out.batch_depth = x.batch_depth;
+    
+    for (0..num_channels) |c| {
+        // Compute mean for this channel
+        var sum: f64 = 0;
+        var count: usize = 0;
+        for (0..x.shape.dims[0]) |n| {
+            for (0..spatial_size) |s| {
+                const idx = n * num_channels * spatial_size + c * spatial_size + s;
+                sum += x.readF64(idx);
+                count += 1;
+            }
+        }
+        const mean = sum / @as(f64, @floatFromInt(count));
+        
+        // Compute variance
+        var var_sum: f64 = 0;
+        for (0..x.shape.dims[0]) |n| {
+            for (0..spatial_size) |s| {
+                const idx = n * num_channels * spatial_size + c * spatial_size + s;
+                const diff = x.readF64(idx) - mean;
+                var_sum += diff * diff;
+            }
+        }
+        const variance = var_sum / @as(f64, @floatFromInt(count));
+        
+        // Normalize
+        const std_val = @sqrt(variance + eps);
+        const w = weight.readF64(c);
+        const b = bias.readF64(c);
+        
+        for (0..x.shape.dims[0]) |n| {
+            for (0..spatial_size) |s| {
+                const idx = n * num_channels * spatial_size + c * spatial_size + s;
+                const normalized = (x.readF64(idx) - mean) / std_val;
+                out.writeF64(idx, normalized * w + b);
+            }
+        }
+    }
+    
+    _ = running_mean;
+    _ = running_var;
+    return out;
+}
+
+/// Group normalization: divides channels into groups and normalizes within each group.
+/// x shape: [N, C, ...]
+/// weight/bias shape: [C]
+pub fn groupNorm(x: Tensor, weight: Tensor, bias: Tensor, num_groups: usize, eps: f64) Error!Tensor {
+    if (x.rank() < 2) return Error.ShapeMismatch;
+    const num_channels = x.shape.dims[1];
+    if (num_channels % num_groups != 0) return Error.ShapeMismatch;
+    
+    const channels_per_group = num_channels / num_groups;
+    const spatial_size = x.numel() / (x.shape.dims[0] * num_channels);
+    
+    var out = try Tensor.empty(x.shape, x.dt);
+    out.batch_depth = x.batch_depth;
+    
+    for (0..x.shape.dims[0]) |n| {
+        for (0..num_groups) |g| {
+            // Compute mean and variance for this group
+            var sum: f64 = 0;
+            var count: usize = 0;
+            
+            for (0..channels_per_group) |c_offset| {
+                const c = g * channels_per_group + c_offset;
+                for (0..spatial_size) |s| {
+                    const idx = n * num_channels * spatial_size + c * spatial_size + s;
+                    sum += x.readF64(idx);
+                    count += 1;
+                }
+            }
+            const mean = sum / @as(f64, @floatFromInt(count));
+            
+            var var_sum: f64 = 0;
+            for (0..channels_per_group) |c_offset| {
+                const c = g * channels_per_group + c_offset;
+                for (0..spatial_size) |s| {
+                    const idx = n * num_channels * spatial_size + c * spatial_size + s;
+                    const diff = x.readF64(idx) - mean;
+                    var_sum += diff * diff;
+                }
+            }
+            const variance = var_sum / @as(f64, @floatFromInt(count));
+            const std_val = @sqrt(variance + eps);
+            
+            // Normalize
+            for (0..channels_per_group) |c_offset| {
+                const c = g * channels_per_group + c_offset;
+                const w = weight.readF64(c);
+                const b = bias.readF64(c);
+                for (0..spatial_size) |s| {
+                    const idx = n * num_channels * spatial_size + c * spatial_size + s;
+                    const normalized = (x.readF64(idx) - mean) / std_val;
+                    out.writeF64(idx, normalized * w + b);
+                }
+            }
+        }
+    }
+    
+    return out;
+}
+
+/// Instance normalization: normalizes each channel independently for each sample.
+/// x shape: [N, C, ...]
+/// weight/bias shape: [C]
+pub fn instanceNorm(x: Tensor, weight: Tensor, bias: Tensor, eps: f64) Error!Tensor {
+    if (x.rank() < 2) return Error.ShapeMismatch;
+    const num_channels = x.shape.dims[1];
+    const spatial_size = x.numel() / (x.shape.dims[0] * num_channels);
+    
+    var out = try Tensor.empty(x.shape, x.dt);
+    out.batch_depth = x.batch_depth;
+    
+    for (0..x.shape.dims[0]) |n| {
+        for (0..num_channels) |c| {
+            // Compute mean and variance for this instance and channel
+            var sum: f64 = 0;
+            for (0..spatial_size) |s| {
+                const idx = n * num_channels * spatial_size + c * spatial_size + s;
+                sum += x.readF64(idx);
+            }
+            const mean = sum / @as(f64, @floatFromInt(spatial_size));
+            
+            var var_sum: f64 = 0;
+            for (0..spatial_size) |s| {
+                const idx = n * num_channels * spatial_size + c * spatial_size + s;
+                const diff = x.readF64(idx) - mean;
+                var_sum += diff * diff;
+            }
+            const variance = var_sum / @as(f64, @floatFromInt(spatial_size));
+            const std_val = @sqrt(variance + eps);
+            
+            // Normalize
+            const w = weight.readF64(c);
+            const b = bias.readF64(c);
+            for (0..spatial_size) |s| {
+                const idx = n * num_channels * spatial_size + c * spatial_size + s;
+                const normalized = (x.readF64(idx) - mean) / std_val;
+                out.writeF64(idx, normalized * w + b);
+            }
+        }
+    }
+    
+    return out;
+}
+
 /// Inverted dropout: scales survivors by `1/(1-p)` while training.
 /// Inverted dropout: scales the surviving activations so the expected value is
 /// unchanged. With `training` off (or `p <= 0`) this is the identity and returns
