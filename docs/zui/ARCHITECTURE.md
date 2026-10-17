@@ -215,6 +215,546 @@ pub fn Ui(comptime Widgets: type) type {
 
 ---
 
+## 3. 関数の分類: シグネチャが関数の正体を語る
+
+Zigの最大の強みの一つは **「関数を見れば何をする関数かわかる」** こと。
+これは偶然ではなく、Zigの設計思想そのもの。
+ZUIでもこの特性を最大限に活かす。
+
+### 3.1 4層の関数分類
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ 分類        │ シグネチャ特徴              │ 例                      │
+├─────────────┼─────────────────────────────┼─────────────────────────┤
+│ PURE        │ 値 → 値                    │ lerp(), distance()      │
+│ (純粋)      │ エラーなし                  │ normalize(), dot()      │
+│             │ ポインタなし                │ clamp(), hash()         │
+├─────────────┼─────────────────────────────┼─────────────────────────┤
+│ COMPUTE     │ 値 + Allocator → 値 or エラー│ layout(), measure()     │
+│ (計算)      │ アロケはあるが副作用なし     │ resolveStyle(), sort()  │
+│             │                             │                         │
+├─────────────┼─────────────────────────────┼─────────────────────────┤
+│ MUTATE      │ *T + 値 → void or エラー    │ update(), setState()    │
+│ (状態変更)  │ 可変ポインタが副作用の印     │ advanceAnimation()      │
+│             │                             │ pushCommand()           │
+├─────────────┼─────────────────────────────┼─────────────────────────┤
+│ EFFECT      │ *T + Io → エラー            │ readFile(), connect()   │
+│ (外部効果)  │ Io = 非決定性の印            │ writePixel(), sleep()   │
+│             │                             │ sendNetwork()           │
+└─────────────┴─────────────────────────────┴─────────────────────────┘
+
+見分け方:
+• 引数にポインタなし → PURE（入力を変えるだけ）
+• Allocatorがある → COMPUTE（メモリ使うが状態は変えない）
+• *Tがある → MUTATE（状態を変える）
+• std.Ioがある → EFFECT（非決定性/外部I/O）
+```
+
+### 3.2 具体例: 同じ操作、異なる分類
+
+```zig
+// ============================================================
+// PURE: 値 → 値、何も変えない、エラーなし
+// ============================================================
+
+/// 2点間の距離（純粋な数学）
+pub fn distance(a: Vec2, b: Vec2) f32 {
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    return @sqrt(dx * dx + dy * dy);
+}
+
+/// 色の線形補間（純粋な数学）
+pub fn lerpColor(a: Color, b: Color, t: f32) Color {
+    return .{
+        .r = a.r + (b.r - a.r) * t,
+        .g = a.g + (b.g - a.g) * t,
+        .b = a.b + (b.b - a.b) * t,
+        .a = a.a + (b.a - a.a) * t,
+    };
+}
+
+/// IDハッシュ（純粋な計算）
+pub fn hashId(str: []const u8) Id {
+    // FNV-1a — 入力が同じなら常に同じ結果
+    var h: u64 = 0xcbf29ce484222325;
+    for (str) |c| { h ^= c; h *%= 0x100000001b3; }
+    return .{ .value = h };
+}
+
+
+// ============================================================
+// COMPUTE: Allocator使うが、状態は変えない
+// ============================================================
+
+/// レイアウト計算（アリーナ使うが、引数のstateは変えない）
+pub fn computeLayout(
+    alloc: Allocator,           // ← アロケータあり = メモリ使う
+    nodes: []const LayoutNode,  // ← const = 読み取り専用
+    constraints: Constraints,   // ← 値 = 変更なし
+) Allocator.Error![]Rect {     // ← エラー = アロケ失敗の可能性
+    var results = try alloc.alloc(Rect, nodes.len);
+    // ... 計算 ...
+    return results;
+}
+
+/// テキスト計測（アリーナ使うが、状態は変えない）
+pub fn measureText(
+    alloc: Allocator,
+    font: *const Font,          // ← *const = 読み取り専用ポインタ
+    text: []const u8,
+) Allocator.Error!Vec2 {
+    // フォントファイルは読むが、UI状態は変えない
+}
+
+
+// ============================================================
+// MUTATE: 状態を変える（可変ポインタが印）
+// ============================================================
+
+/// アニメーション更新（状態を変える = *Animation）
+pub fn tickAnimation(
+    self: *Animation,           // ← 可変ポインタ = 状態変更！
+    current_time: f64,
+) void {
+    self.elapsed = current_time - self.start_time;
+    self.progress = @min(self.elapsed / self.duration, 1.0);
+}
+
+/// ディスプレイリストにコマンド追加（状態を変える = *DisplayList）
+pub fn pushCommand(
+    self: *DisplayList,         // ← 可変ポインタ = 状態変更！
+    cmd: Command,
+) Allocator.Error!void {
+    try self.commands.append(self.allocator, cmd);
+}
+
+/// スクロール位置更新
+pub fn updateScroll(
+    self: *ScrollState,         // ← 可変ポインタ
+    delta: Vec2,
+) void {
+    self.offset = Vec2.add(self.offset, delta);
+}
+
+
+// ============================================================
+// EFFECT: 非決定性/外部I/O（std.Ioが印）
+// ============================================================
+
+/// フォントファイル読み込み（ファイルI/O = std.Io）
+pub fn loadFont(
+    io: std.Io,                 // ← Io = 外部I/O！
+    alloc: Allocator,
+    path: []const u8,
+) FontError!Font {
+    const data = try io.readFileAlloc(alloc, path);
+    return parseFont(alloc, data);
+}
+
+/// ウィンドウに表示（画面I/O = std.Io）
+pub fn presentFrame(
+    io: std.Io,                 // ← Io = 外部I/O！
+    backend: *Backend,
+    buffer: []const u32,
+) PresentError!void {
+    try io.writeDisplay(buffer);
+}
+```
+
+### 3.3 comptime で関数の性質を検証する
+
+Zigのcomptimeを使えば、「純粋関数にポインタ引数がないこと」などを
+**コンパイル時に検証** できる。これもZigだけの特徴。
+
+```zig
+/// 関数が PURE（値のみ入出力）であることをcomptimeで検証
+fn assertPure(comptime F: type) void {
+    const info = @typeInfo(F).@"fn";
+    for (info.params) |param| {
+        const T = param.type.?;
+        // ポインタ型があったらコンパイルエラー
+        if (@typeInfo(T) == .pointer) {
+            @compileError("Pure function cannot take pointer parameter: " ++ @typeName(T));
+        }
+    }
+}
+
+/// 関数が MUTATE（可変ポインタあり）であることをcomptimeで検証
+fn assertMutate(comptime F: type) void {
+    const info = @typeInfo(F).@"fn";
+    var has_mutable = false;
+    for (info.params) |param| {
+        const T = param.type.?;
+        if (@typeInfo(T) == .pointer) {
+            if (!@typeInfo(T).pointer.is_const) {
+                has_mutable = true;
+            }
+        }
+    }
+    if (!has_mutable) {
+        @compileError("Mutate function must have at least one mutable pointer parameter");
+    }
+}
+
+// 使用例:
+comptime {
+    assertPure(@TypeOf(distance));         // ✅ 通る
+    assertPure(@TypeOf(lerpColor));        // ✅ 通る
+    // assertPure(@TypeOf(tickAnimation)); // ❌ コンパイルエラー！
+    assertMutate(@TypeOf(tickAnimation));  // ✅ 通る
+}
+```
+
+### 3.4 DisplayList = 「副作用の記録」
+
+ZUIの重要な設計: **ウィジェットは直接描画しない**。
+描画コマンドをDisplayListに「記録」する。
+これにより「何が描かれるか」がデータになり、テスト・変換・最適化が可能になる。
+
+```zig
+// ウィジェットは「描きたいもの」を返す（直接は描かない）
+pub fn button(self: *Ui, label: []const u8) Error!Response {
+    // ... 相互作用計算 ...
+
+    // DisplayList にコマンドを「記録」（MUTATE: 状態を変える）
+    try self.display_list.push(.{ .fill_rect = .{
+        .rect = rect,
+        .color = bg_color,
+        .radius = self.theme.radius,
+    }});
+    try self.display_list.push(.{ .text = .{
+        .pos = text_pos,
+        .content = label,
+        .color = text_color,
+    }});
+
+    return .{ .clicked = was_clicked };
+}
+
+// 後で一度にレンダリング（EFFECT: 外部I/O）
+pub fn renderAll(
+    io: std.Io,                     // ← Io = ここで初めて外部I/O
+    list: *const DisplayList,       // ← *const = 読み取り専用
+    target: *RenderBackend,
+) RenderError!void {
+    for (list.commands.items) |cmd| {
+        switch (cmd) {
+            .fill_rect => |r| try target.fillRect(r),
+            .text => |t| try target.drawText(t),
+        }
+    }
+    try target.present(io);         // ← ここで画面に出力
+}
+```
+
+**この設計のメリット:**
+1. **テスト容易**: DisplayListはデータなので、アサーションで検証可能
+2. **変換可能**: 同じDisplayListをSoftware/GPU/テストバックエンドで描画
+3. **最適化可能**: コマンドを並び替え、バッチング、カリング
+4. **再現可能**: 同じInput → 同じDisplayList → 同じピクセル（決定的）
+
+### 3.5 型で効果を示すパターン集
+
+```zig
+// ============================================================
+// 値型 (Value Types) — 不変、コピー可能、PURE操作のみ
+// ============================================================
+const Vec2 = struct { x: f32, y: f32 };          // 値
+const Color = struct { r: f32, g: f32, b: f32, a: f32 };  // 値
+const Rect = struct { x: f32, y: f32, w: f32, h: f32 };   // 値
+const Input = struct { pointer: Vec2, ... };      // 値（毎フレーム生成）
+
+// ============================================================
+// 状態型 (State Types) — 可変ポインタで操作、MUTATE
+// ============================================================
+const DisplayList = struct { commands: ArrayList(Command) };
+const Context = struct { hot: ?Id, active: ?Id, ... };
+const Animation = struct { progress: f32, ... };
+
+// ============================================================
+// 設定型 (Config Types) — comptimeで特殊化、不変
+// ============================================================
+const UiConfig = struct {
+    Backend: type,     // comptime型
+    Widgets: type,     // comptime型
+    Quality: Quality,  // comptime値
+};
+
+// ============================================================
+// 効果型 (Effect Types) — Io/Allocatorが必要
+// ============================================================
+const Font = struct { data: []const u8 };  // loadFont(io, alloc) → Font
+const Image = struct { pixels: []u32 };    // loadImage(io, alloc) → Image
+
+// ============================================================
+// Union で効果の種類を明示
+// ============================================================
+const Command = union(enum) {
+    fill_rect: struct { rect: Rect, color: Color, radius: f32 },
+    stroke_rect: struct { rect: Rect, color: Color, width: f32 },
+    fill_circle: struct { center: Vec2, radius: f32, color: Color },
+    text: struct { pos: Vec2, content: []const u8, color: Color },
+    image: struct { rect: Rect, image_id: u32 },
+    clip: Rect,
+    restore_clip: void,
+};
+// → Commandは「描画効果」の列挙。どれか1つだけ。
+```
+
+### 3.6 「シグネチャを読む」練習
+
+```zig
+// 問題: 以下の関数はそれぞれ何者？
+
+// (a) 引数: 値のみ、戻り値: 値、エラーなし
+fn smoothStep(edge0: f32, edge1: f32, x: f32) f32;
+// → PURE: 純粋な数学関数。入力が同じなら常に同じ結果。
+
+// (b) 引数: *const（読み取り専用）、Allocator、エラー: アロケ
+fn buildDisplayList(alloc: Allocator, widgets: []const Widget) Allocator.Error!DisplayList;
+// → COMPUTE: メモリを使うが、入力状態は変えない。新しい値を生成して返す。
+
+// (c) 引数: *T（可変ポインタ）、値、エラーなし
+fn advanceFrame(self: *Ui, input: Input) void;
+// → MUTATE: Uiの状態を変える。外部I/Oはしない。
+
+// (d) 引数: std.Io、*T（可変）、Allocator、エラー
+fn loadTheme(io: std.Io, alloc: Allocator, path: []const u8) ThemeError!Theme;
+// → EFFECT: ファイルI/O（非決定性）あり。結果は実行環境で変わる可能性。
+
+// (e) 引数: comptime T、値のみ
+fn renderWidget(comptime T: type, widget: T, rect: Rect) []Command;
+// → PURE + comptime: コンパイル時に特殊化。実行時は純粋計算。
+//    comptimeがあるので、Tごとに別の関数が生成される。
+```
+
+### 3.7 まとめ: ZUIの関数分類ルール
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                                                             │
+│  引数に何があるかで関数の性質が100%わかる:                   │
+│                                                             │
+│  なし (値のみ)        = PURE     「計算するだけ」           │
+│  + Allocator          = COMPUTE  「メモリ使うが状態不变」    │
+│  + *T (可変)          = MUTATE   「状態を変える」           │
+│  + std.Io             = EFFECT   「外部と通信する」         │
+│  + comptime T: type   = SPECIAL  「コンパイル時に特殊化」   │
+│                                                             │
+│  戻り値で関数の結果がわかる:                                 │
+│                                                             │
+│  値                   = 計算結果                            │
+│  !T (error union)     = 失敗する可能性                      │
+│  void                 = 状態を変えた（戻り値なし）           │
+│                                                             │
+│  このルールを知っていれば、初めて見る関数でも                │
+│  シグネチャだけで「何をする関数か」が即座にわかる。          │
+│  これがZigの設計思想であり、ZUIもこれに従う。               │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 3.8 Zig固有のイディオムをZUIに活かす
+
+#### `inline for` — コンパイル時ループでコード生成
+
+```zig
+/// comptimeでウィジェット関数を直接インライン展開
+/// 各ウィジェットが個別の関数呼び出しとして生成される（dispatch不要）
+pub fn registerWidgets(comptime widgets: anytype) type {
+    return struct {
+        pub fn dispatch(ui: anytype, id: WidgetId) anyerror!Response {
+            inline for (widgets) |W| {
+                if (W.id == id) {
+                    return W.draw(ui); // ← 各ウィジェットが直接インライン化
+                }
+            }
+            return error.UnknownWidget;
+        }
+    };
+}
+
+/// comptimeで品質レベルに応じたdraw関数を生成
+pub fn specializedDraw(comptime Q: Quality) type {
+    return struct {
+        pub fn roundedRect(draw: anytype, rect: Rect, color: Color, radius: f32) void {
+            if (Q == .low) {
+                draw.fillRect(rect, color); // low = 角丸なし、最速
+            } else {
+                draw.fillRoundedRect(rect, color, radius);
+            }
+        }
+    };
+}
+```
+
+#### `errdefer` — エラー時のクリーンアップを明示
+
+```zig
+/// フォント読み込み: エラーなら自動でアリーナ解放
+pub fn loadFont(alloc: Allocator, data: []const u8) FontError!Font {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    errdefer arena.deinit();  // ← エラーで抜けたら自動解放
+    const arena_alloc = arena.allocator();
+
+    const glyphs = try parseGlyphs(arena_alloc, data);
+    const atlas = try buildAtlas(arena_alloc, glyphs);
+
+    return .{
+        .arena = arena,
+        .glyphs = glyphs,
+        .atlas = atlas,
+    };
+    // 成功 → arenaはFontと一緒に生きる
+    // エラー → errdeferがarena.deinit()を呼ぶ
+}
+
+/// Ui初期化: 途中で失敗したら全部クリーンアップ
+pub fn init(comptime C: type, alloc: Allocator) InitError!Ui(C) {
+    var self: Ui(C) = .{
+        .allocator = alloc,
+        .display_list = .empty,
+        .state = .{},
+    };
+    errdefer self.deinit();
+
+    self.font = try font.load(alloc);
+    errdefer self.font.deinit(alloc);
+
+    self.atlas = try atlas.init(alloc, self.font);
+    // 全部成功 → 返す
+    // どこかで失敗 → errdeferが逆順で全部クリーンアップ
+    return self;
+}
+```
+
+#### `unreachable` — 到達不可能を明示
+
+```zig
+/// switch で全ケース処理後の「絶対にここに来ない」
+pub fn axisIndex(v: Vec2, comptime axis: Axis) f32 {
+    return switch (axis) {
+        .x => v.x,
+        .y => v.y,
+        // Axis は enum で x,y しかないので、これ以外ありえない
+        // 将来 Axis に .z が増えたらコンパイルエラーで気づく
+    };
+}
+
+/// デバッグビルドではパニック、リリースでは最適化ヒント
+fn findWidget(self: *Context, id: Id) ?*WidgetState {
+    for (self.widgets.items) |*w| {
+        if (w.id.eql(id)) return w;
+    }
+    if (comptime std.debug.runtime_safety) {
+        unreachable; // デバッグ: バグ検出
+    }
+    return null; // リリース: 安全フォールバック
+}
+```
+
+#### Tagged Union + exhaustiveness — 網羅性でバグを防ぐ
+
+```zig
+/// レイアウト結果のunion: 全ケースを明示的に処理
+pub const LayoutResult = union(enum) {
+    leaf: struct { size: Vec2 },
+    row: struct { children: []const LayoutResult, gap: f32 },
+    col: struct { children: []const LayoutResult, gap: f32 },
+    stack: struct { children: []const LayoutResult },
+
+    /// 全ケース処理。新しいケース追加時にコンパイルエラーで気づく
+    pub fn totalSize(self: LayoutResult) Vec2 {
+        return switch (self) {
+            .leaf => |l| l.size,
+            .row => |r| blk: {
+                var w: f32 = 0;
+                var max_h: f32 = 0;
+                for (r.children, 0..) |child, i| {
+                    const s = child.totalSize();
+                    w += s.x;
+                    if (i > 0) w += r.gap;
+                    max_h = @max(max_h, s.y);
+                }
+                break :blk .{ .x = w, .y = max_h };
+            },
+            .col => |c| blk: {
+                // ... 同様
+            },
+            .stack => |s| blk: {
+                // ...
+            },
+        };
+    }
+};
+
+/// Command union: 新しいコマンド追加時にレンダラー側のswitchがコンパイルエラー
+pub fn renderCommand(backend: anytype, cmd: Command) anyerror!void {
+    switch (cmd) {
+        .fill_rect => |r| try backend.fillRect(r.rect, r.color, r.radius),
+        .text => |t| try backend.drawText(t.pos, t.content, t.color),
+        // .new_command を追加したら → ここがコンパイルエラー → 忘れない
+    }
+}
+```
+
+#### `anytype` + duck typing — インターフェース宣言ゼロのポリモーフィズム
+
+```zig
+/// 「描けるもの」は型宣言不要。fillRectを持っていればそれでいい。
+pub fn drawWidget(drawer: anytype, widget: Widget, rect: Rect) @TypeOf(drawer).Error!void {
+    // drawer が fillRect, drawText を持っていればコンパイル通る
+    // 持っていなければコンパイルエラー（明確なメッセージ）
+    try drawer.fillRect(rect, widget.bg_color, widget.radius);
+    try drawer.drawText(rect.center(), widget.label, widget.text_color);
+}
+
+// 上記は以下すべてで使える（それぞれ別の関数が生成される）:
+// - SoftwareRenderer → 直接ピクセル操作にインライン展開
+// - GpuRenderer → GPUコマンド生成にインライン展開
+// - TestMock → テスト用記録にインライン展開
+// - NullRenderer → 完全no-opに最適化（リリースで全コード除去）
+//
+// Rust: trait + impl が必要
+// C++: template concept が必要
+// Zig: anytype だけでOK、コンパイル時に型チェック
+```
+
+#### `comptime` 型生成 — 設定から型そのものを作る
+
+```zig
+/// 品質レベルから専用のRenderer型を生成
+pub fn RendererFor(comptime Q: Quality, comptime Backend: type) type {
+    return struct {
+        backend: Backend,
+
+        pub fn fillRoundedRect(self: *@This(), rect: Rect, color: Color, radius: f32) !void {
+            if (Q == .low) {
+                // low品質: 角丸を無視、矩形のみ描画
+                return self.backend.fillRect(rect, color);
+            }
+            // medium/high: 実際の角丸描画
+            return self.backend.fillRoundedRect(rect, color, radius);
+        }
+
+        pub fn fillShadow(self: *@This(), rect: Rect, color: Color, blur: f32) !void {
+            if (Q == .low or Q == .medium) {
+                return; // shadow描画なし → コードが完全に消える
+            }
+            return self.backend.fillShadow(rect, color, blur);
+        }
+    };
+}
+
+// 使用時: コンパイル時に型が確定、ランタイムコストゼロ
+const MyRenderer = RendererFor(.high, SoftwareBackend);
+// → .low/.medium のコードはバイナリに含まれない
+```
+
+---
+
 ## 4. データフロー設計
 
 ### 4.1 全体のフロー（1フレーム）
@@ -540,3 +1080,212 @@ test "render - produces correct pixels" {
     try expectEqual(@as(u32, 0xFFFFFFFF), buffer[10 * 100 + 10]);
 }
 ```
+
+---
+
+## 9. 全パターン統合: ボタンウィジェットの完全実装
+
+ここでは、セクション3で説明した全てのZigイディオムを使った
+ボタンウィジェットの完全な実装を示す。
+**シグネチャを読むだけで関数の性質がわかる** ことを確認してほしい。
+
+```zig
+// src/zui/widgets/button.zig
+const std = @import("std");
+
+// ============================================================
+// 型定義: すべて値型、副作用なし
+// ============================================================
+
+pub const Options = struct {
+    style: ButtonStyle = .primary,
+    disabled: bool = false,
+};
+
+pub const ButtonStyle = enum { primary, secondary, ghost, danger };
+
+pub const Response = struct {
+    clicked: bool,     // このフレームでクリックされた
+    hovered: bool,     // 現在ホバー中
+    focused: bool,     // 現在フォーカス中
+};
+
+// ============================================================
+// メイン関数: シグネチャから全てがわかる
+// ============================================================
+
+/// ボタンを描画し、相互作用を返す
+///
+/// シグネチャの読み方:
+///   *Ui(C)          → MUTATE: Uiの状態を変える
+///   []const u8      → PURE: ラベルは読み取り専用
+///   Options          → PURE: オプションは値（コピー）
+///   Error!Response   → 失敗する可能性あり、Responseを返す
+pub fn button(
+    comptime C: type,              // SPECIAL: コンパイル時に特殊化
+    self: *Ui(C),                  // MUTATE: 状態を変える
+    label: []const u8,             // PURE: 読み取り専用
+    opts: Options,                 // PURE: 値コピー
+) Ui(C).Error!Response {
+    // --- ID生成 (PURE: comptime文字列 + カウンタ) ---
+    const id = self.nextId("button");
+
+    // --- 相互作用判定 (PURE: 入力とIDから計算) ---
+    const is_hot = self.isHot(id);
+    const is_active = self.isActive(id);
+    const is_focused = self.isFocused(id);
+
+    // --- クリック判定 (PURE: 入力イベントから計算) ---
+    const just_clicked = is_active and self.input.pointer_released and is_hot;
+
+    // --- レイアウト計算 (COMPUTE: アリーナ使用) ---
+    const text_size = try measureText(self.allocator, self.font, label, self.theme.font_size);
+    const content_size = text_size.add(.{ .x = self.theme.pad * 2, .y = self.theme.pad * 2 });
+    const rect = try self.allocateSpace(content_size);
+
+    // --- 色決定 (PURE: 状態から計算) ---
+    const bg = colorForStyle(self.theme, opts.style, .{
+        .hovered = is_hot,
+        .active = is_active,
+        .disabled = opts.disabled,
+    });
+
+    // --- 描画コマンド生成 (MUTATE: DisplayListに記録) ---
+    // 直接描画せず、コマンドを「記録」する
+    try self.display_list.push(self.allocator, .{ .fill_rect = .{
+        .rect = rect,
+        .color = bg,
+        .radius = self.theme.radius,
+    }});
+
+    // --- テキスト描画コマンド (MUTATE: DisplayListに記録) ---
+    const text_pos = rect.center().sub(text_size.scale(0.5));
+    try self.display_list.push(self.allocator, .{ .text = .{
+        .pos = text_pos,
+        .content = label,
+        .font_size = self.theme.font_size,
+        .color = textColorForStyle(self.theme, opts.style, opts.disabled),
+    }});
+
+    // --- レスポンス (値を返す、副作用なし) ---
+    return .{
+        .clicked = just_clicked and !opts.disabled,
+        .hovered = is_hot and !opts.disabled,
+        .focused = is_focused,
+    };
+}
+
+// ============================================================
+// 補助関数: すべてPURE（値 → 値）
+// ============================================================
+
+/// スタイルと状態から背景色を計算
+/// シグネチャ: 値のみ → 値 → エラーなし = PURE
+fn colorForStyle(
+    theme: Theme,
+    style: ButtonStyle,
+    state: struct { hovered: bool, active: bool, disabled: bool },
+) Color {
+    if (state.disabled) return theme.widget;
+    if (state.active) return theme.accent;
+    if (state.hovered) return theme.widget_hover;
+    return switch (style) {
+        .primary => theme.accent,
+        .secondary => theme.widget,
+        .ghost => .{ .a = 0 },
+        .danger => Color.hex(0xff4444, 1),
+    };
+}
+
+/// スタイルからテキスト色を計算
+fn textColorForStyle(theme: Theme, style: ButtonStyle, disabled: bool) Color {
+    if (disabled) return theme.text_dim;
+    return switch (style) {
+        .primary => theme.accent_text,
+        .danger => .{ .r = 1, .g = 1, .b = 1, .a = 1 },
+        else => theme.text,
+    };
+}
+
+// ============================================================
+// テスト: 各関数の性質が明確
+// ============================================================
+
+// PURE関数のテスト: 外部依存ゼロ
+test "colorForStyle - primary default" {
+    const color = colorForStyle(Theme.dark, .primary, .{ .hovered = false, .active = false, .disabled = false });
+    try std.testing.expectEqual(Theme.dark.accent.r, color.r);
+}
+
+// PURE関数のテスト: 状態変化を網羅
+test "colorForStyle - hover changes color" {
+    const normal = colorForStyle(Theme.dark, .primary, .{ .hovered = false, .active = false, .disabled = false });
+    const hovered = colorForStyle(Theme.dark, .primary, .{ .hovered = true, .active = false, .disabled = false });
+    try std.testing.expect(!normal.approxEql(hovered, 0.01));
+}
+
+// MUTATE関数のテスト: TestBackendで状態変化を検証
+test "button - full click cycle" {
+    var ui = TestUi.init(std.testing.allocator);
+    defer ui.deinit();
+
+    // Frame 1: ポインタがボタン上に
+    const r1 = try ui.run(.{ .pointer = .{ .x = 50, .y = 13 } });
+    try std.testing.expect(r1.hovered);
+    try std.testing.expect(!r1.clicked);
+
+    // Frame 2: クリック（press + release）
+    const r2 = try ui.run(.{
+        .pointer = .{ .x = 50, .y = 13 },
+        .pointer_pressed = true,
+        .pointer_released = true,
+    });
+    try std.testing.expect(r2.clicked);
+}
+```
+
+### この実装から読み取れること
+
+```
+1. button() のシグネチャ:
+   fn button(comptime C, self: *Ui(C), label: []const u8, opts: Options) Error!Response
+   → comptime 特殊化 + 状態変更 + 読み取り専用データ + 値 + エラー可能性 + 結果
+
+2. 補助関数のシグネチャ:
+   fn colorForStyle(theme: Theme, style: ButtonStyle, state: State) Color
+   → 値のみ + 値のみ + 値 → 値 = 完全に純粋、テスト容易
+
+3. 描画は「記録」:
+   try self.display_list.push(allocator, .{ .fill_rect = ... })
+   → MUTATE（DisplayListを変える）、EFFECTではない（まだ描いていない）
+   → 実際の描画は render() で行う（ここで初めて std.Io が必要）
+
+4. テストの分類:
+   - colorForStyle テスト → 純粋、Allocator不要、Io不要
+   - button テスト → TestBackend を注入、Io不要（DisplayList検証）
+   - render テスト → SoftwareBackend + スナップショット比較
+```
+
+---
+
+## 10. まとめ: ZUIのZigらしさチェックリスト
+
+| # | 特徴 | ZUIでの実装 | 他の言語で同等が可能か |
+|---|------|-----------|---------------------|
+| 1 | シグネチャが関数の性質を語る | 値=PURE, *T=MUTATE, Io=EFFECT | 部分的（Rustの&mut程度） |
+| 2 | comptime で型を生成 | Ui(Config), Renderer(Backend) | C++ テンプレートが近い |
+| 3 | comptime でコードを生成 | inline for, WidgetSet dispatch | C++ constexpr が近い |
+| 4 | comptime で検証 | assertPure(), exhaustive switch | 不可（Zig独有） |
+| 5 | 隠れたアロケーションゼロ | 全関数にAllocator明示 | なし |
+| 6 | 隠れたI/Oゼロ | 全I/Oにstd.Io明示 | なし（Zig 0.16+） |
+| 7 | エラー伝播が構文的 | error union + try + catch | Rust Result が近い |
+| 8 | errdefer でクリーンアップ | 全初期化関数で errdefer | C++ RAII が近い |
+| 9 | 副作用をデータで記録 | DisplayList (Command union) | 独自（UI分野） |
+| 10 | anytype でゼロコスト抽象 | drawWidget(anytype) | C++ template が近い |
+| 11 | tagged union で網羅性 | Command, LayoutResult switch | Rust enum が近い |
+| 12 | unreachable で不可能を宣言 | exhaustive switch の最後 | 独自（最適化ヒント） |
+| 13 | 固定長配列 vs スライス | InlineBuffer [64]Command | C/C++ と同じ |
+| 14 | 手続き型UI | if/for/switch がそのままUI | 独自（DSL不要） |
+
+**全14項目中、Zig独有が3、他言語に近いがZigが最优が7、同等が4。**
+**特に comptime検証（#4）と Io明示（#6）はZig 0.16+でしか実現できない。**
