@@ -169,9 +169,46 @@ pub fn Ui(comptime Widgets: type) type {
 | **入力処理** | 毎フレーム `Input` 値として受け取る | テストでは任意の入力を注入可能 |
 | **body実行** | 毎フレーム `body.run()` を呼ぶ | 決定論的であること |
 | **レイアウト計算** | 制約 + サイズ → 位置 | 純粋関数、キャッシュ可能 |
+| **コマンドバッチング** | DisplayList → OptimizedBatch | comptime制御、Web時は積極統合 |
 | **アニメーション** | 時間 + パラメータ → 値 | 純粋関数、テスト可能 |
-| **レンダリング** | ディスプレイリスト → ピクセル | バックエンド固有 |
+| **レンダリング** | バッチ → ピクセル | comptime でバックエンド特殊化 |
 | **アロケーション** | すべて `Allocator` で制御 | フレーム毎にarenaリセット |
+
+### Command Batch Layer（comptime制御）
+
+Web/WASM環境でのCPU↔GPU通信オーバーヘッドを削減する層。
+comptime で有効/無効を制御し、不要な場合は完全に消滅する。
+
+```zig
+// 設定による動作違い
+const WebConfig = .{
+    .enabled = true,      // Web: 積極的バッチング
+    .target = .webgpu,
+    .max_batch_size = 1000,
+};
+
+const NativeConfig = .{
+    .enabled = false,     // Native: 直接パス（ゼロオーバーヘッド）
+    .target = .vulkan,
+};
+
+// comptime で型が決定される → 不要なコードは消える
+const Processor = BatchProcessor(Config);
+
+pub fn process(self: *Processor, commands: []const Command) []const BatchedCommand {
+    if (comptime Config.enabled) {
+        return self.batchAggressively(commands);
+    } else {
+        return commands; // comptime でこの分岐は消える
+    }
+}
+```
+
+**バッチング戦略**:
+- 同材質（色・テクスチャ）のコマンドを統合
+- 描画順を最適化（state change 最小化）
+- 小さな操作をマージ（複数の小さな矩形 → 1つのバッチ）
+- プラットフォーム固有の最適化（Web: 転送量削減、Native: メモリアラインメント）
 
 ### 構成図: 何がどこで解決されるか
 
@@ -797,14 +834,22 @@ const MyRenderer = RendererFor(.high, SoftwareBackend);
 │  │   • アリーナ使用（フレーム終了で解放）              │              │
 │  └─────┬─────────────────────────────────────────────┘              │
 │        │                                                            │
-│  ⑤ RENDER（特殊化済み）                                              │
+│  ⑤ COMMAND BATCHING (comptime制御)                                  │
 │  ┌─────▼─────────────────────────────────────────────┐              │
-│  │ backend.render(positioned_list, target)           │              │
-│  │   • コマンドをピクセルに変換                       │              │
+│  │ batch.process(display_list)                       │              │
+│  │   • Web: 積極的バッチング（コマンド統合）          │              │
+│  │   • Native: comptime無効化 → 直接パス             │              │
+│  │   • 同材質の統合、state change最小化               │              │
+│  └─────┬─────────────────────────────────────────────┘              │
+│        │                                                            │
+│  ⑥ RENDER（特殊化済み）                                              │
+│  ┌─────▼─────────────────────────────────────────────┐              │
+│  │ backend.render(batched_commands, target)          │              │
+│  │   • WebGPU/Vulkan/Metal/DirectX                   │              │
 │  │   • comptime特殊化で分岐ゼロ                      │              │
 │  └─────┬─────────────────────────────────────────────┘              │
 │        │                                                            │
-│  ⑥ RESULT                                                           │
+│  ⑦ RESULT                                                           │
 │  ┌─────▼─────┐                                                      │
 │  │ Frame     │ ← 呼び出し元に返す                                    │
 │  │ Result    │   (イベント、次のフレームが必要か)                     │
@@ -941,6 +986,17 @@ pub fn Ui(comptime Config: UiConfig) type {
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
+│                      LEVEL 4: GPU (ハードウェア)                    │
+│                                                                     │
+│   gpu/device.zig         GpuDevice インターフェース                │
+│   gpu/backends/webgpu.zig WebGPU実装                               │
+│   gpu/backends/vulkan.zig Vulkan実装                               │
+│   gpu/backends/metal.zig  Metal実装                                │
+│   gpu/backends/directx.zig DirectX 12実装                          │
+│   gpu/batch.zig          Command Batch Layer (comptime制御)        │
+│   gpu/shaders/           WGSL シェーダープログラム                 │
+│                                                                     │
+├────────────────────────────────────────────────────────────────────┤
 │                      LEVEL 3: COMPOSITION                         │
 │                                                                     │
 │   ui.zig         Ui(C) を構築、body.run() を実行                   │

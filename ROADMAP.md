@@ -221,40 +221,65 @@ Microsecond layout with zero allocations
 
 ---
 
-### 🎯 Milestone 3: GPU Backend (P0)
-**Inspired by**: GPUI, Vello
+### 🎯 Milestone 3: GPU Backend & Command Batch Layer (P0)
+**Inspired by**: GPUI, Vello, WebRender
 
-Direct GPU rendering via wgpu
+Direct GPU rendering via 4 APIs + intelligent command batching
 
-#### 3.1 wgpu Integration
-- [ ] wgpu device/queue initialization
-- [ ] Swapchain management (per-window)
-- [ ] Render pipeline creation
-- [ ] Uniform buffer management
-- [ ] Texture atlas for fonts/images
+#### 3.1 GPU Abstraction Layer (自作)
+- [ ] `GpuDevice` interface (WebGPU/Vulkan/Metal/DirectX)
+- [ ] Platform detection and backend selection
+- [ ] Shader compilation pipeline (WGSL → platform-specific)
+- [ ] Memory management (buffers, textures, samplers)
+- [ ] Synchronization primitives (fences, semaphores)
 
-#### 3.2 GPU Rendering Pipeline
-- [ ] Vertex/index buffer generation from display list
-- [ ] Batched draw calls (instanced rendering)
+#### 3.2 Command Batch Layer (comptime制御)
+- [ ] `BatchProcessor(Config)` comptime型
+- [ ] Command grouping by material/texture
+- [ ] Draw call sorting (minimize state changes)
+- [ ] Small operation merging (e.g., multiple small rects → single batch)
+- [ ] Platform-specific optimization passes
+- [ ] **Native**: comptime `.enabled = false` → zero-cost pass-through
+- [ ] **Web**: comptime `.enabled = true` → aggressive batching
+
+**Why this layer matters**:
+```
+Native Desktop:
+  1000 draw commands → 1000 API calls → ~1-10ms (acceptable)
+
+Web/WASM:
+  1000 draw commands → 1000 JS calls → 10-500ms (critical)
+  ↓ batch layer
+  1000 draw commands → 50 batched calls → ~1-5ms (acceptable)
+```
+
+#### 3.3 Backend Implementations
+- [ ] **WebGPU**: Primary for web, fallback for native
+- [ ] **Vulkan**: Linux/Windows high-performance
+- [ ] **Metal**: macOS/iOS native
+- [ ] **DirectX 12**: Windows native
+- [ ] Common test suite for all backends
+
+#### 3.4 GPU Rendering Pipeline
+- [ ] Vertex/index buffer generation from batched commands
+- [ ] Instanced rendering for similar shapes
 - [ ] Shader programs:
   - Solid color (rounded rects)
   - Linear/radial gradients
-  - Shadow (gaussian blur)
+  - Shadow (gaussian blur via compute shader)
   - Text (SDF rendering)
   - Image (textured quads)
 
-#### 3.3 Platform Backends
-- [ ] Vulkan (Linux/Windows)
-- [ ] Metal (macOS/iOS)
-- [ ] DX12 (Windows)
-- [ ] WebGPU (WebAssembly)
-
-**Performance Target**: <2ms per frame for complex UI, 120fps capable
+**Performance Target**: 
+- Native: <2ms per frame for complex UI, 120fps
+- Web: <5ms per frame (after batching), 60fps minimum
 
 **Deliverables**:
-- `zapp/renderer/gpu/` — wgpu-based GPU renderer
-- `zapp/renderer/gpu/shaders/` — WGSL shader programs
-- `zapp/renderer/gpu/pipelines.zig` — Render pipeline management
+- `zapp/gpu/device.zig` — GPU abstraction interface
+- `zapp/gpu/backends/` — WebGPU, Vulkan, Metal, DirectX implementations
+- `zapp/gpu/batch.zig` — Command batch layer (comptime-configurable)
+- `zapp/gpu/shaders/` — WGSL shader programs
+- `zapp/gpu/pipelines.zig` — Render pipeline management
 
 ---
 
