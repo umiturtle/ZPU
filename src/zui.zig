@@ -49,6 +49,17 @@ pub const instances = @import("zui/instances.zig");
 pub const pipeline = @import("zui/pipeline.zig");
 pub const atlas = @import("zui/atlas.zig");
 
+// New loosely-coupled modules (independently testable)
+pub const color = @import("zui/color.zig");
+pub const vec2 = @import("zui/vec2.zig");
+pub const rect = @import("zui/rect.zig");
+pub const id = @import("zui/id.zig");
+pub const theme = @import("zui/theme.zig");
+pub const style = @import("zui/style.zig");
+pub const layout = @import("zui/layout.zig");
+pub const animation = @import("zui/animation.zig");
+pub const event_bus = @import("zui/event_bus.zig");
+
 pub const Vec2 = types.Vec2;
 pub const Axis = types.Axis;
 pub const Rect = types.Rect;
@@ -92,4 +103,14 @@ test {
     _ = @import("zui/text.zig");
     _ = @import("zui/types.zig");
     _ = @import("zui/ui.zig");
+    // New loosely-coupled modules
+    _ = @import("zui/color.zig");
+    _ = @import("zui/vec2.zig");
+    _ = @import("zui/rect.zig");
+    _ = @import("zui/id.zig");
+    _ = @import("zui/theme.zig");
+    _ = @import("zui/style.zig");
+    _ = @import("zui/layout.zig");
+    _ = @import("zui/animation.zig");
+    _ = @import("zui/event_bus.zig");
 }
