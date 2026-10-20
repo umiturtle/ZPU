@@ -9,6 +9,11 @@
 //!
 //! Because recording is centralised here, the whole public surface is
 //! automatically differentiable, vmappable and jit-able.
+//!
+//! Performance optimizations:
+//! - SIMD vectorization via kernels.zig (32-byte vectors)
+//! - Multi-threaded parallel execution for large tensors via parallel.zig
+//! - Tiled GEMM with cache-friendly access patterns
 const std = @import("std");
 const dtype_mod = @import("dtype.zig");
 const shape_mod = @import("shape.zig");
@@ -19,6 +24,7 @@ const scalar = @import("scalar.zig");
 const kernels = @import("kernels.zig");
 const tape_mod = @import("tape.zig");
 const graph_mod = @import("graph.zig");
+const parallel = @import("parallel.zig");
 
 pub const DType = dtype_mod.DType;
 pub const Shape = shape_mod.Shape;
