@@ -29,6 +29,37 @@ jobs:
       run: zig fmt --check src/ examples/
       continue-on-error: true
 
+  benchmark:
+    name: Benchmark
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+    
+    - name: Build benchmark
+      run: |
+        zig build-exe --dep zpu \
+          -Mroot=bench/comprehensive.zig \
+          -Mzpu=src/zpu.zig \
+          -OReleaseSafe \
+          -lc \
+          -femit-bin=bench/comprehensive
+    
+    - name: Run benchmark
+      run: ./bench/comprehensive
+    
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results
+        path: bench/comprehensive
+      continue-on-error: true
+
   build-examples:
     name: Build Examples
     runs-on: ubuntu-latest
