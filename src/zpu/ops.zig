@@ -14,10 +14,13 @@
 //! - SIMD vectorization via kernels.zig (32-byte vectors)
 //! - Multi-threaded parallel execution for large tensors via parallel.zig
 //! - Tiled GEMM with cache-friendly access patterns
+//! - AOT-optimized specialized kernels via aot_optimizations.zig
+//! - Automatic kernel fusion via fusion.zig and auto_fusion.zig
 const std = @import("std");
 const dtype_mod = @import("dtype.zig");
 const shape_mod = @import("shape.zig");
 const context = @import("context.zig");
+const aot_optimizations = @import("aot_optimizations.zig");
 const prims = @import("prims.zig");
 const tmod = @import("tensor.zig");
 const scalar = @import("scalar.zig");

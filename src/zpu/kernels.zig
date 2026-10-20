@@ -69,7 +69,7 @@ pub fn hasVectorForm(comptime p: Prim) bool {
 /// The vector expression for `p`. Every branch here has a scalar twin in
 /// `scalar.unaryF` *with the same shape of expression*, which is the only reason
 /// the two paths can be swapped without a test noticing.
-inline fn applyUnary(comptime T: type, comptime p: Prim, x: Vec(T)) Vec(T) {
+pub inline fn applyUnary(comptime T: type, comptime p: Prim, x: Vec(T)) Vec(T) {
     const V = Vec(T);
     const one: V = @splat(1);
     const zero: V = @splat(0);
@@ -137,7 +137,7 @@ pub fn hasVectorBinary(comptime p: Prim) bool {
     };
 }
 
-inline fn applyBinary(comptime T: type, comptime p: Prim, a: Vec(T), b: Vec(T)) Vec(T) {
+pub inline fn applyBinary(comptime T: type, comptime p: Prim, a: Vec(T), b: Vec(T)) Vec(T) {
     return switch (p) {
         .add => a + b,
         .sub => a - b,
