@@ -770,8 +770,10 @@ test "hessian: the Hessian of a quadratic is its matrix" {
             // Keep everything 1-D: treat x as a column, compute xᵀ A x = sum(x * (A @ x)).
             const x = a[0];
             const xr = try zpu.reshape(x, try Shape.init(&.{ 2, 1 }));
-            const Ax = try zpu.reshape(try zpu.matmul(A, xr), try Shape.init(&.{2}));
-            const quad = try zpu.sumAll(try zpu.mul(x, Ax));
+            const matmul_result = try zpu.matmul(A, xr);
+            const Ax = try zpu.reshape(matmul_result, try Shape.init(&.{2}));
+            const mul_result = try zpu.mul(x, Ax);
+            const quad = try zpu.sumAll(mul_result);
             return try zpu.mulScalar(quad, 0.5);
         }
     };

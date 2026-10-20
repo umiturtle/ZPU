@@ -171,7 +171,8 @@ pub fn hessian(
         fn call(user: ?*anyopaque, a: []const Tensor) anyerror!Tensor {
             const c: *const Ctx = @ptrCast(@alignCast(user.?));
             var r = try transforms.valueAndGrad(c.the_alloc, c.inner, c.inner_ud, a, &.{0});
-            const g = r.grads[0].retain();
+            // Use retainScoped to make the gradient owned by the current scope
+            const g = r.grads[0].retainScoped();
             r.deinit();
             return g;
         }

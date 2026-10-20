@@ -476,10 +476,7 @@ pub fn jacobian(
     defer alloc.free(indices);
 
     // Evaluate once to learn the output shape and size.
-    // Note: the function may return either a scope-owned or caller-owned tensor.
-    // We don't deinit it here to avoid double-free on scope-owned tensors.
-    // This may leak caller-owned tensors (e.g., from hessian's GradWrapper),
-    // but that's a known limitation of the current ownership model.
+    // The function returns a scope-owned tensor (via retainScoped).
     const value = try f(ud, args);
     const m = value.numel();
     const n = args[wrt].numel();
