@@ -208,13 +208,66 @@ python3 -m ziglang build test
 # ドキュメント生成
 python3 -m ziglang build doc
 
-# ベンチマーク
-python3 -m ziglang build bench
+# ベンチマーク（ローカル実行）
+python3 -m ziglang build-exe --dep zpu \
+  -Mroot=bench/comprehensive.zig \
+  -Mzpu=src/zpu.zig \
+  -OReleaseSafe \
+  -lc \
+  -femit-bin=bench/comprehensive
+./bench/comprehensive
 ```
 
 **重要**: CIはZig 0.17.0を使用しています。ローカルでも同じバージョンを使用してください。
 
 **テストを実行する前に、必ずZigをインストールすること。**
+
+### 4.2 ベンチマークの実行方法
+
+**ベンチマークの結果は、ローカルではなくGitHub Actionsで取得すること。**
+
+#### GitHub Actionsでのベンチマーク実行
+
+**すべてのベンチマーク結果はGitHub Actionsで取得します。**
+
+`.github/workflows/ci.yml` にベンチマークジョブが含まれており、プッシュするたびに自動的に実行されます。
+
+**ベンチマーク結果の確認方法**:
+
+```bash
+# 最新のCI実行を確認
+gh run list --workflow=ci.yml --limit 5
+
+# 特定の実行の詳細を確認
+gh run view <run_id>
+
+# ベンチマークジョブの結果を確認
+gh run view <run_id> --json jobs --jq '.jobs[] | select(.name == "Benchmark")'
+```
+
+**CIでのベンチマーク実行内容**:
+1. `bench/comprehensive.zig` をReleaseSafe最適化でビルド
+2. ベンチマークを実行（10K, 100K, 1M, 10M要素）
+3. 結果をArtifactとしてアップロード
+
+**ローカルでベンチマークを実行する場合**:
+```bash
+# Zigをインストール（まだの場合）
+pip install --break-system-packages ziglang
+
+# ベンチマークをビルド
+python3 -m ziglang build-exe --dep zpu \
+  -Mroot=bench/comprehensive.zig \
+  -Mzpu=src/zpu.zig \
+  -OReleaseSafe \
+  -lc \
+  -femit-bin=bench/comprehensive
+
+# 実行
+./bench/comprehensive
+```
+
+**注意**: ローカルで実行する場合は、CPUの周波数変動やキャッシュの状態によって結果がばらつくことがあります。正確な比較にはGitHub Actionsの結果を使用してください。
 
 ---
 
@@ -227,22 +280,34 @@ python3 -m ziglang build bench
 GitHub Actions (`.github/workflows/ci.yml`) により：
 
 1. **テスト実行** — `zig build test`
-2. **サンプルビルド** — 各デモアプリのビルド
-3. **WebAssemblyビルド** — Web版のビルド
-4. **スナップショット比較** — 視覚的リグレッションテスト
-5. **GitHub Pagesデプロイ** — 以下を自動公開：
+2. **ベンチマーク実行** — `bench/comprehensive.zig` をReleaseSafeでビルド・実行、結果をArtifactに保存
+3. **サンプルビルド** — 各デモアプリのビルド
+4. **WebAssemblyビルド** — Web版のビルド
+5. **スナップショット比較** — 視覚的リグレッションテスト
+6. **GitHub Pagesデプロイ** — 以下を自動公開：
    - `zig build doc` で生成したドキュメント（HTML）
    - WebAssembly版デモアプリ
    - スナップショット画像
 
 **URL**: `https://<username>.github.io/ZPU/`
 
-**開発フロー**:
-```
-コード変更 → プッシュ → CI自動実行 → Webページ自動更新
+**ベンチマーク結果の確認**:
+```bash
+# 最新のCI実行を確認
+gh run list --workflow=ci.yml --limit 5
+
+# ベンチマークジョブの結果を確認
+gh run view <run_id> --json jobs --jq '.jobs[] | select(.name == "Benchmark")'
 ```
 
-**注意**: ドキュメントを変更したら、ローカルで `zig build doc` を実行して確認してからプッシュすること。
+**開発フロー**:
+```
+コード変更 → プッシュ → CI自動実行（テスト+ベンチマーク） → Webページ自動更新
+```
+
+**注意**: 
+- ベンチマーク結果はGitHub Actionsで確認すること（ローカル結果は参考値）
+- ドキュメントを変更したら、ローカルで `zig build doc` を実行して確認してからプッシュすること
 
 ### 5.2 最高品質を目指す
 
