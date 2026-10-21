@@ -48,6 +48,10 @@ const progress_widget = @import("widgets/progress.zig");
 const spacer_widget = @import("widgets/spacer.zig");
 const tooltip_widget = @import("widgets/tooltip.zig");
 const collapsing_widget = @import("widgets/collapsing.zig");
+const scrollable_widget = @import("widgets/scrollable.zig");
+const virtual_list_widget = @import("widgets/virtual_list.zig");
+const text_edit_widget = @import("widgets/text_edit.zig");
+const container_widget = @import("widgets/container.zig");
 
 const Alignment = types.Alignment;
 const Axis = types.Axis;
@@ -160,7 +164,7 @@ const Mode = enum { measure, draw };
 
 /// One container's layout state; the top of the stack is where the next widget
 /// goes.
-const LayoutFrame = struct {
+pub const LayoutFrame = struct {
     mode: Mode,
     dir: Axis = .y,
     /// Content box (draw) or the offered space (measure).
@@ -182,7 +186,7 @@ const LayoutFrame = struct {
     /// Space the `fill` children share (draw mode).
     fill_extent: f32 = 0,
 
-    fn contentMain(self: *const LayoutFrame) f32 {
+    pub fn contentMain(self: *const LayoutFrame) f32 {
         return if (self.dir == .x) self.content.w else self.content.h;
     }
 
@@ -664,39 +668,7 @@ pub const Ui = struct {
     /// `body` is any value with `run(self, ui) Error!void` — the struct instance
     /// *is* the captured state.
     pub fn container(self: *Ui, id: []const u8, style: Style, body: anytype) Error!void {
-        const avail = self.available();
-        self.pushId(id);
-        defer self.popId();
-
-        const measured = try self.measureContainer(style, avail, body);
-        const r = self.occupy(style, measured.content);
-        if (self.measuring) return;
-        if (r.isEmpty()) return;
-
-        if (style.bg.a > 0 or (style.border > 0 and style.border_color.a > 0) or style.radius > 0) {
-            try self.paintRounded(r, style.radius, style.bg, style.border, style.border_color);
-        }
-
-        const content_rect = r.inset(style.pad);
-        const previous_clip = self.clip;
-        if (style.clip) try self.pushClip(r);
-        defer if (style.clip) {
-            self.popClip(previous_clip) catch {};
-        };
-
-        var frame = drawFrame(style, content_rect, measured);
-        if (frame.weight == 0 and style.justify != .start) {
-            const slack = @max(0, frame.contentMain() - measured.fixed_main);
-            const off: f32 = switch (style.justify) {
-                .start, .stretch => 0,
-                .center => slack * 0.5,
-                .end => slack,
-            };
-            frame.cursor += off;
-        }
-        self.pushLayout(frame);
-        defer self.popLayout();
-        try body.run(self);
+        return container_widget.container(self, id, style, body);
     }
 
     const Measured = struct {
@@ -820,60 +792,13 @@ pub const Ui = struct {
 
     // ------------------------------------------------------------ scroll view
 
-    pub const ScrollOptions = struct {
-        style: Style = .{},
-        bar: f32 = 8,
-    };
+    pub const ScrollOptions = scrollable_widget.ScrollOptions;
 
     /// A container that scrolls its children. The offset is retained (it cannot
     /// be recomputed from a single frame's input), the clipping is the
     /// painter's, and the bar only appears when the content does not fit.
     pub fn scrollable(self: *Ui, id: []const u8, opts: ScrollOptions, body: anytype) Error!void {
-        const avail = self.available();
-        self.pushId(id);
-        defer self.popId();
-        const key = self.idOf("scroll");
-
-        const measured = try self.measureContainer(opts.style, .{ .x = @max(0, avail.x - opts.bar), .y = std.math.floatMax(f32) }, body);
-        const r = self.occupy(opts.style, measured.content);
-        if (self.measuring) return;
-        if (r.isEmpty()) return;
-
-        // Unlike a plain container, a scroll region paints itself even with a
-        // transparent style: it owns the pixels that the bar and the clipped
-        // children are drawn against.
-        try self.paintRounded(r, opts.style.radius, opts.style.bg, opts.style.border, opts.style.border_color);
-
-        const view = r.inset(.{ .l = opts.style.pad.l, .t = opts.style.pad.t, .r = opts.style.pad.r + opts.bar, .b = opts.style.pad.b });
-        const content_h = measured.content.y;
-        const scroll = try self.scrollRegion(key, r, view, content_h, opts.bar, opts.style.pad);
-
-        // Children are laid out in an unclipped column at `-scroll` and then
-        // clipped: layout never has to know about scrolling.
-        var frame = LayoutFrame{
-            .mode = .draw,
-            .dir = opts.style.dir,
-            .content = Rect.init(view.x, view.y - scroll, view.w, content_h),
-            .gap = opts.style.gap,
-            .cross_align = opts.style.cross_align,
-            .cursor = view.y - scroll,
-            .cross = view.w,
-            .fixed_main = measured.fixed_main,
-            .fill_content = measured.fill_content,
-            .weight = measured.weight,
-            .gaps = measured.gaps,
-            .max_cross = measured.max_cross,
-        };
-        frame.fill_extent = @max(0, content_h - measured.fixed_main);
-
-        const previous_clip = self.clip;
-        try self.pushClip(view);
-        self.pushLayout(frame);
-        defer {
-            self.popLayout();
-            self.popClip(previous_clip) catch {};
-        }
-        try body.run(self);
+        return scrollable_widget.scrollable(self, id, opts, body);
     }
 
     // ------------------------------------------------------------- scrolling
@@ -884,7 +809,7 @@ pub const Ui = struct {
     /// `scrollable` and `virtualList` both go through here, so a list and a
     /// viewport cannot disagree about what a wheel event does or where the thumb
     /// sits. Returns the offset to lay the children out at.
-    fn scrollRegion(self: *Ui, key: Id, r: Rect, view: Rect, content_h: f32, bar: f32, pad: Edges) Error!f32 {
+    pub fn scrollRegion(self: *Ui, key: Id, r: Rect, view: Rect, content_h: f32, bar: f32, pad: Edges) Error!f32 {
         const max_scroll = @max(0, content_h - view.h);
 
         var scroll = self.ctx.scrollOf(key).y;
@@ -917,17 +842,7 @@ pub const Ui = struct {
 
     // ------------------------------------------------------------- virtual list
 
-    pub const VirtualOptions = struct {
-        style: Style = .{},
-        /// Every row is exactly this tall. A fixed height is what makes the
-        /// visible range a division instead of a measuring pass over rows that
-        /// will never be drawn — and it is the honest contract: a list that
-        /// wants variable heights has to know them before it builds the rows.
-        row_height: f32 = 22,
-        /// Layout inside one row (padding, gap, direction).
-        row_style: Style = .{},
-        bar: f32 = 10,
-    };
+    pub const VirtualOptions = virtual_list_widget.VirtualOptions;
 
     /// A list that only builds the rows you can see.
     ///
@@ -948,66 +863,7 @@ pub const Ui = struct {
         ctx: anytype,
         comptime rowFn: fn (@TypeOf(ctx), *Ui, usize, Rect) Error!void,
     ) Error!void {
-        self.pushId(id);
-        defer self.popId();
-        const key = self.idOf("scroll");
-
-        const avail = self.available();
-        const gap = opts.style.gap;
-        const row_h = @max(0, opts.row_height);
-        const pitch = row_h + gap;
-        const total: f32 = if (rows == 0) 0 else @as(f32, @floatFromInt(rows)) * pitch - gap;
-
-        const r = self.occupy(opts.style, .{ .x = @min(avail.x, opts.style.min_w), .y = total });
-        if (self.measuring) return;
-        if (r.isEmpty()) return;
-
-        try self.paintRounded(r, opts.style.radius, opts.style.bg, opts.style.border, opts.style.border_color);
-
-        const view = r.inset(.{ .l = opts.style.pad.l, .t = opts.style.pad.t, .r = opts.style.pad.r + opts.bar, .b = opts.style.pad.b });
-        const scroll = try self.scrollRegion(key, r, view, total, opts.bar, opts.style.pad);
-        if (view.h <= 0 or pitch <= 0) return;
-
-        // The visible range: two divisions, not a walk. Row `i` is visible when
-        // `i * pitch < scroll + view.h`, so the exclusive end is that quotient
-        // rounded up; `first` is the same quotient rounded down. No slack row,
-        // because a row that cannot be seen is a row that should not be built.
-        const first_f = @floor(scroll / pitch);
-        const first: usize = @min(rows, @as(usize, @intFromFloat(@max(0, first_f))));
-        const last: usize = @min(rows, @as(usize, @intFromFloat(@max(0, @ceil((scroll + view.h) / pitch)))));
-        if (last <= first) return;
-
-        const row_style = opts.row_style;
-        const previous_clip = self.clip;
-        try self.pushClip(view);
-        defer self.popClip(previous_clip) catch {};
-
-        var i = first;
-        while (i < last) : (i += 1) {
-            const row_y = view.y - scroll + @as(f32, @floatFromInt(i)) * pitch;
-            const box = Rect{
-                .x = view.x + row_style.pad.l,
-                .y = row_y + row_style.pad.t,
-                .w = @max(0, view.w - row_style.pad.sum(.x)),
-                .h = @max(0, row_h - row_style.pad.sum(.y)),
-            };
-            // A layout frame per row, sized by the caller's `row_height`: no
-            // measure pass, no intermediate container, and the next row's
-            // position comes from its index rather than from what this one used.
-            self.pushLayout(.{
-                .mode = .draw,
-                .dir = row_style.dir,
-                .content = box,
-                .gap = row_style.gap,
-                .cross_align = row_style.cross_align,
-                .cursor = if (row_style.dir == .x) box.x else box.y,
-                .cross = if (row_style.dir == .x) box.h else box.w,
-            });
-            defer self.popLayout();
-            self.pushIdIndex(i);
-            defer self.popId();
-            try rowFn(ctx, self, i, box);
-        }
+        return virtual_list_widget.virtualList(self, id, rows, opts, ctx, rowFn);
     }
 
     // ---------------------------------------------------------------- tooltip
@@ -1034,107 +890,13 @@ pub const Ui = struct {
 
     // -------------------------------------------------------------- text field
 
-    pub const TextEditOptions = struct {
-        placeholder: []const u8 = "",
-        w: Size = .full,
-        enabled: bool = true,
-    };
+    pub const TextEditOptions = text_edit_widget.TextEditOptions;
 
     /// The one genuinely retained widget: a caret is a cursor, and a cursor is
     /// not a function of the string. Everything a *caller* sees — the value and
     /// the change flag — stays immediate.
     pub fn textEdit(self: *Ui, id: []const u8, field: *TextField, opts: TextEditOptions) Error!bool {
-        const key = self.idOf(id);
-        const size = self.theme.font_size;
-        const metrics = font.measure("", size);
-        const r = self.occupy(
-            .{ .w = opts.w, .h = Size{ .px = @max(self.theme.item_h, metrics.height + 4) }, .min_w = 80 },
-            .{ .x = @max(80, metrics.width), .y = metrics.height },
-        );
-        const resp = self.respond(key, r, true, opts.enabled);
-        if (self.measuring) return false;
-
-        const edit = self.ctx.edit(key);
-        var changed = false;
-        if (resp.hovered and self.input.pointer_pressed and !self.ctx.focus.eql(key)) {
-            self.requestFocus(key);
-            edit.moveTo(field.offsetAtX(size, self.input.pointer.x - (r.x + self.theme.pad) + edit.scroll));
-        } else if (resp.focused and self.input.pointer_pressed) {
-            edit.moveTo(field.offsetAtX(size, self.input.pointer.x - (r.x + self.theme.pad) + edit.scroll));
-        }
-
-        if (resp.focused) {
-            for (self.input.text) |cp| {
-                if (cp < 32 or cp > 126) continue;
-                if (edit.hasSelection()) {
-                    const sel = edit.selection();
-                    edit.moveTo(field.deleteRange(sel[0], sel[1]));
-                }
-                edit.moveTo(field.insert(edit.caret, @intCast(cp)));
-                changed = true;
-            }
-            if (self.input.keyPressed(.backspace)) {
-                if (edit.hasSelection()) {
-                    const sel = edit.selection();
-                    edit.moveTo(field.deleteRange(sel[0], sel[1]));
-                } else if (edit.caret > 0) {
-                    edit.moveTo(field.deleteRange(TextField.stepLeft(edit.caret), edit.caret));
-                }
-                changed = true;
-            }
-            if (self.input.keyPressed(.delete)) {
-                if (edit.hasSelection()) {
-                    const sel = edit.selection();
-                    edit.moveTo(field.deleteRange(sel[0], sel[1]));
-                } else {
-                    _ = field.deleteRange(edit.caret, field.stepRight(edit.caret));
-                }
-                changed = true;
-            }
-            if (self.input.keyPressed(.left)) edit.moveTo(TextField.stepLeft(edit.caret));
-            if (self.input.keyPressed(.right)) edit.moveTo(field.stepRight(edit.caret));
-            if (self.input.keyPressed(.home)) edit.moveTo(0);
-            if (self.input.keyPressed(.end)) edit.moveTo(field.len);
-        }
-        if (changed) self.markDirty();
-
-        // Keep the caret inside the box by scrolling the text itself.
-        const inner_w = @max(1, r.w - self.theme.pad * 2);
-        const caret_x = field.xOfOffset(size, edit.caret);
-        if (caret_x - edit.scroll > inner_w) edit.scroll = caret_x - inner_w;
-        if (caret_x - edit.scroll < 0) edit.scroll = caret_x;
-        edit.scroll = @max(0, edit.scroll);
-
-        const fill = Color.lerp(self.theme.track, self.theme.surface, resp.hover_t * 0.35);
-        try self.paintRounded(r, self.theme.radius * 0.6, fill, 1, if (resp.focused) self.theme.accent else self.theme.border);
-
-        const text_x = r.x + self.theme.pad - edit.scroll;
-        const baseline = r.y + (r.h - metrics.height) * 0.5 + metrics.ascent;
-        const previous_clip = self.clip;
-        try self.pushClip(r.shrink(1));
-        if (field.len == 0 and !resp.focused) {
-            try self.paintText(r.x + self.theme.pad, baseline, size, self.theme.text_dim.scale(0.8), opts.placeholder);
-        } else {
-            if (edit.hasSelection()) {
-                const sel = edit.selection();
-                const x0 = text_x + field.xOfOffset(size, sel[0]);
-                const x1 = text_x + field.xOfOffset(size, sel[1]);
-                try self.paintRounded(Rect.init(x0, r.y + 3, @max(1, x1 - x0), r.h - 6), 2, self.theme.accent.withAlpha(0.35), 0, Color.transparent);
-            }
-            try self.paintText(text_x, baseline, size, self.theme.text, field.slice());
-        }
-        if (resp.focused) {
-            // A blinking caret, solid right after an edit so typing never looks
-            // laggy. The blink is a function of the frame's `time`, which the
-            // host supplies — the library has no clock of its own.
-            if (@mod(self.input.time, 1.0) < 0.5 or edit.caret_age < 0.35) {
-                try self.paintRect(Rect.init(text_x + caret_x, r.y + 4, 1.5, r.h - 8), self.theme.text);
-            }
-        }
-        try self.popClip(previous_clip);
-        edit.caret_age += self.input.dt;
-        edit.focused = true;
-        return changed and opts.enabled;
+        return text_edit_widget.textEdit(self, id, field, opts);
     }
 
     // ---------------------------------------------------------------- helpers

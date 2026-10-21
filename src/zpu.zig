@@ -300,6 +300,16 @@ pub const flip = ops.flip;
 pub const cumsum = ops.cumsum;
 pub const applyPrim = ops.applyPrim;
 
+// ---- fused operations (performance-critical, reduced memory traffic) --------
+pub const fusion = @import("zpu/fusion.zig");
+pub const fusedAddRelu = ops.fusedAddRelu;
+pub const fusedAddSigmoid = ops.fusedAddSigmoid;
+pub const fusedAddTanh = ops.fusedAddTanh;
+pub const fusedMulRelu = ops.fusedMulRelu;
+pub const fusedGateSigmoid = ops.fusedGateSigmoid;
+pub const fusedGateTanh = ops.fusedGateTanh;
+pub const FusedOps = fusion.FusedOps;
+
 test {
     std.testing.refAllDecls(@This());
 }
