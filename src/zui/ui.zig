@@ -52,6 +52,14 @@ const scrollable_widget = @import("widgets/scrollable.zig");
 const virtual_list_widget = @import("widgets/virtual_list.zig");
 const text_edit_widget = @import("widgets/text_edit.zig");
 const container_widget = @import("widgets/container.zig");
+const scroll_region_widget = @import("widgets/scroll_region.zig");
+const occupy_widget = @import("widgets/occupy.zig");
+const respond_widget = @import("widgets/respond.zig");
+const measure_container_widget = @import("widgets/measure_container.zig");
+const frame_widget = @import("widgets/frame.zig");
+const helpers_widget = @import("widgets/helpers.zig");
+const paint_widget = @import("widgets/paint.zig");
+const lifecycle_widget = @import("widgets/lifecycle.zig");
 
 const Alignment = types.Alignment;
 const Axis = types.Axis;
@@ -199,7 +207,7 @@ pub const LayoutFrame = struct {
     }
 
     /// What is left of the content box's main axis.
-    fn remaining(self: *const LayoutFrame) f32 {
+    pub fn remaining(self: *const LayoutFrame) f32 {
         return @max(0, self.contentMain() - (self.cursor - self.cursorStart()));
     }
 };
@@ -214,7 +222,7 @@ pub const FrameResult = struct {
 };
 
 /// A tooltip waiting to be painted at the end of the frame.
-const Tip = struct {
+pub const Tip = struct {
     anchor: Rect,
     text: []const u8,
 };
@@ -278,47 +286,27 @@ pub const Ui = struct {
     max_lines: usize = 64,
 
     pub fn init(alloc: std.mem.Allocator, opts: Options) Ui {
-        return .{
-            .alloc = alloc,
-            .ctx = context_mod.Context.init(alloc),
-            .list = .{},
-            .theme = opts.theme,
-            .viewport = .{ .x = opts.width, .y = opts.height },
-            .arena = std.heap.ArenaAllocator.init(alloc),
-            .max_lines = opts.max_lines,
-        };
+        return lifecycle_widget.init(alloc, opts);
     }
 
     pub fn deinit(self: *Ui) void {
-        self.arena.deinit();
-        self.focusables.deinit(self.alloc);
-        self.focusables_prev.deinit(self.alloc);
-        self.list.deinit(self.alloc);
-        self.ctx.deinit();
+        return lifecycle_widget.deinit(self);
     }
 
     pub fn resize(self: *Ui, width: f32, height: f32) void {
-        if (self.viewport.x == width and self.viewport.y == height) return;
-        self.viewport = .{ .x = width, .y = height };
-        self.markDirty();
+        return lifecycle_widget.resize(self, width, height);
     }
 
     pub fn isMeasuring(self: *const Ui) bool {
-        return self.measuring;
+        return lifecycle_widget.isMeasuring(self);
     }
 
     pub fn markDirty(self: *Ui) void {
-        self.dirty = true;
+        return lifecycle_widget.markDirty(self);
     }
 
     pub fn stats(self: *const Ui) Stats {
-        return .{
-            .frames = self.ctx.frames,
-            .rebuilt = self.ctx.rebuilt,
-            .skipped = self.ctx.skipped,
-            .commands = self.list.len(),
-            .revision = self.list.revision,
-        };
+        return lifecycle_widget.stats(self);
     }
 
     // ------------------------------------------------------------------- frame
@@ -326,105 +314,29 @@ pub const Ui = struct {
     /// Runs one frame. `body` is any value with `run(self, ui) Error!void`: a
     /// hand-rolled closure, which is how Zig spells one without allocating.
     pub fn run(self: *Ui, input: Input, body: anytype) Error!FrameResult {
-        self.beginFrame(input);
-        // `endFrame` must have run before the result is taken (it is what bumps
-        // the revision) and must still run if the body fails half way through,
-        // or the next frame would start with a half-open layout stack.
-        errdefer self.endFrame();
-        if (!self.skipping) try body.run(self);
-        self.endFrame();
-        return self.result();
+        return lifecycle_widget.run(self, input, body);
     }
 
     pub fn beginFrame(self: *Ui, input: Input) void {
-        self.ctx.frames += 1;
-
-        // The one retained decision, and the reason this library is a hybrid:
-        // when nothing arrived, nothing is animating and the program did not mark
-        // anything dirty, the picture cannot differ from last frame's, so the
-        // body is not run and the display list is reused as-is.
-        //
-        // The pointer position is part of "nothing arrived": a moved pointer can
-        // light up a different widget, so the body has to see it. `isIdle` alone
-        // cannot know that — it is a property of one frame, and a position needs
-        // two — which is why the previous position is retained here.
-        const pointer_moved = !input.pointer.eql(self.last_pointer);
-        self.skipping = self.can_skip and input.isIdle() and !pointer_moved;
-
-        self.input = input;
-        self.last_pointer = input.pointer;
-        self.ctx.animating = false;
-        self.dirty = false;
-        _ = self.arena.reset(.retain_capacity);
-        self.id_top = 0;
-        self.depth = 0;
-        self.clip = .{ .w = std.math.floatMax(f32), .h = std.math.floatMax(f32) };
-        // Hotness is "under the pointer *this* frame", so it is recomputed from
-        // scratch; `active`, `focus` and the animations are what persist.
-        self.ctx.hot = Id.none;
-        std.mem.swap(std.ArrayListUnmanaged(Id), &self.focusables, &self.focusables_prev);
-        self.focusables.clearRetainingCapacity();
-
-        if (self.skipping) {
-            self.ctx.skipped += 1;
-            return;
-        }
-        self.handleFocusKeys();
-        self.list.reset();
-        self.pushRootLayout();
+        return frame_widget.beginFrame(self, input);
     }
 
     pub fn endFrame(self: *Ui) void {
-        if (self.skipping) {
-            self.list.reused = true;
-            return;
-        }
-        self.list.reused = false;
-        self.list.revision += 1;
-        while (self.depth > 0) self.popLayout();
-        // Last, so nothing in the frame can cover it.
-        if (self.tip) |tip| self.paintTooltip(tip) catch {};
-        self.tip = null;
-        self.ctx.rebuilt += 1;
-        self.can_skip = self.input.isIdle() and !self.dirty and !self.ctx.animating;
-        self.ctx.focusables.clearRetainingCapacity();
-        self.ctx.focusables.appendSlice(self.ctx.alloc, self.focusables.items) catch {};
+        return frame_widget.endFrame(self);
     }
 
     /// Draws the queued tooltip: a bordered panel under the anchor, flipped
     /// above it and clamped inside the window when there is no room below.
-    fn paintTooltip(self: *Ui, tip: Tip) !void {
-        const size = self.theme.font_size;
-        const m = font.measure(tip.text, size);
-        const pad = 5;
-        const w = m.width + pad * 2;
-        const h = m.height + pad * 2;
-        var r = Rect{ .x = tip.anchor.x + 6, .y = tip.anchor.y + tip.anchor.h + 5, .w = w, .h = h };
-        if (r.y + r.h > self.viewport.y) r.y = @max(0, tip.anchor.y - r.h - 5);
-        r.x = std.math.clamp(r.x, 0, @max(0, self.viewport.x - r.w));
-        try self.paintRounded(r, self.theme.radius, self.theme.surface, 1, self.theme.border);
-        try self.paintText(r.x + pad, r.y + pad + m.ascent, size, self.theme.text, tip.text);
+    pub fn paintTooltip(self: *Ui, tip: Tip) !void {
+        return helpers_widget.paintTooltip(self, tip);
     }
 
     fn result(self: *const Ui) FrameResult {
-        return .{
-            .rebuilt = !self.skipping,
-            .skipped = self.skipping,
-            .commands = self.list.len(),
-            .revision = self.list.revision,
-        };
+        return lifecycle_widget.result(self);
     }
 
-    fn pushRootLayout(self: *Ui) void {
-        self.layouts[0] = .{
-            .mode = .draw,
-            .dir = .y,
-            .content = .{ .x = 0, .y = 0, .w = self.viewport.x, .h = self.viewport.y },
-            .gap = self.theme.gap,
-            .cursor = 0,
-            .cross = self.viewport.x,
-        };
-        self.depth = 1;
+    pub fn pushRootLayout(self: *Ui) void {
+        return helpers_widget.pushRootLayout(self);
     }
 
     // ---------------------------------------------------------------- painting
@@ -440,41 +352,30 @@ pub const Ui = struct {
     }
 
     pub fn paintRect(self: *Ui, r: Rect, color: Color) Error!void {
-        if (self.measuring or color.a <= 0 or r.isEmpty()) return;
-        try self.list.push(self.alloc, .{ .rect = .{ .r = r, .color = color } });
+        return paint_widget.paintRect(self, r, color);
     }
 
     pub fn paintRounded(self: *Ui, r: Rect, radius: f32, color: Color, border: f32, border_color: Color) Error!void {
-        if (self.measuring or r.isEmpty()) return;
-        if (color.a <= 0 and (border <= 0 or border_color.a <= 0)) return;
-        try self.list.push(self.alloc, .{
-            .rounded = .{ .r = r, .radius = radius, .color = color, .border = border, .border_color = border_color },
-        });
+        return paint_widget.paintRounded(self, r, radius, color, border, border_color);
     }
 
     pub fn paintLine(self: *Ui, a: Vec2, b: Vec2, width: f32, color: Color) Error!void {
-        if (self.measuring or color.a <= 0) return;
-        try self.list.push(self.alloc, .{ .line = .{ .a = a, .b = b, .width = width, .color = color } });
+        return paint_widget.paintLine(self, a, b, width, color);
     }
 
     pub fn paintTriangle(self: *Ui, a: Vec2, b: Vec2, c: Vec2, color: Color) Error!void {
-        if (self.measuring or color.a <= 0) return;
-        try self.list.push(self.alloc, .{ .triangle = .{ .a = a, .b = b, .c = c, .color = color } });
+        return paint_widget.paintTriangle(self, a, b, c, color);
     }
 
     /// One line of text, baseline at `y`. The bytes are copied into the frame
     /// arena, so the caller's string may die immediately.
     pub fn paintText(self: *Ui, x: f32, baseline: f32, size: f32, color: Color, content: []const u8) Error!void {
-        if (self.measuring or color.a <= 0 or content.len == 0) return;
-        const owned = try self.arena.allocator().dupe(u8, content);
-        try self.list.push(self.alloc, .{
-            .text = .{ .pos = .{ .x = x, .y = baseline }, .size = size, .color = color, .text = owned },
-        });
+        return paint_widget.paintText(self, x, baseline, size, color, content);
     }
 
     // ------------------------------------------------------------------ layout
 
-    fn top(self: *Ui) *LayoutFrame {
+    pub fn top(self: *Ui) *LayoutFrame {
         return &self.layouts[self.depth - 1];
     }
 
@@ -502,69 +403,7 @@ pub const Ui = struct {
     /// Reserves a box: accumulates in the measure pass, returns the placement
     /// and advances the cursor in the draw pass.
     pub fn occupy(self: *Ui, style: Style, content_size: Vec2) Rect {
-        const lf = self.top();
-        const main = lf.dir;
-        const cross = main.other();
-
-        const min_main = style.minAlong(main);
-        const min_cross = style.minAlong(cross);
-        const wanted_main = @max(min_main, content_size.index(main) + style.pad.sum(main));
-        const wanted_cross = @max(min_cross, content_size.index(cross) + style.pad.sum(cross));
-        const main_req = style.sizeAlong(main);
-        const cross_req = style.sizeAlong(cross);
-
-        if (lf.mode == .measure) {
-            switch (main_req) {
-                .auto => lf.fixed_main += wanted_main,
-                .px => |v| lf.fixed_main += @max(v, min_main),
-                .fill => |w| {
-                    lf.fill_content += wanted_main;
-                    lf.weight += w;
-                },
-            }
-            if (lf.children > 0) {
-                lf.fixed_main += lf.gap;
-                lf.fill_content += lf.gap;
-                lf.gaps += lf.gap;
-            }
-            const want_cross: f32 = switch (cross_req) {
-                .auto, .fill => wanted_cross,
-                .px => |v| @max(v, min_cross),
-            };
-            lf.max_cross = @max(lf.max_cross, want_cross);
-            lf.children += 1;
-            return Rect.fromSize(0, 0);
-        }
-
-        const main_extent: f32 = @max(min_main, switch (main_req) {
-            .auto => wanted_main,
-            .px => |v| v,
-            .fill => |w| if (lf.weight > 0) lf.fill_extent * (w / lf.weight) else lf.remaining(),
-        });
-        const cross_extent: f32 = @max(min_cross, switch (cross_req) {
-            .px => |v| v,
-            .fill => lf.cross,
-            .auto => if (lf.cross_align == .stretch) lf.cross else wanted_cross,
-        });
-
-        const start = if (lf.children == 0) lf.cursor else lf.cursor + lf.gap;
-        lf.cursor = start + main_extent;
-        lf.children += 1;
-
-        const slack = @max(0, lf.cross - cross_extent);
-        const cross_off: f32 = switch (cross_req) {
-            .fill => 0,
-            .px, .auto => switch (lf.cross_align) {
-                .start, .stretch => 0,
-                .center => slack * 0.5,
-                .end => slack,
-            },
-        };
-
-        return if (main == .x)
-            Rect.init(start, lf.content.y + cross_off, main_extent, cross_extent)
-        else
-            Rect.init(lf.content.x + cross_off, start, cross_extent, main_extent);
+        return occupy_widget.occupy(self, style, content_size);
     }
 
     // --------------------------------------------------------------------- ids
@@ -597,43 +436,7 @@ pub const Ui = struct {
     // -------------------------------------------------------------- interaction
 
     pub fn respond(self: *Ui, id: Id, r: Rect, focusable: bool, enabled: bool) Response {
-        var resp = Response{ .rect = r };
-        if (self.measuring) return resp;
-        resp.disabled = !enabled;
-
-        const visible = r.overlaps(self.clip);
-        const hovered = enabled and visible and r.contains(self.input.pointer);
-        if (hovered) self.ctx.hot = id;
-        resp.hovered = hovered;
-
-        if (focusable and enabled) {
-            self.focusables.append(self.alloc, id) catch {};
-            if (hovered and self.input.pointer_pressed) self.requestFocus(id);
-            if (self.ctx.focus.eql(id)) {
-                if (self.input.keyPressed(.enter) or self.input.keyPressed(.space)) resp.clicked = true;
-                if (self.input.keyPressed(.escape)) self.ctx.focus = Id.none;
-            }
-        }
-        resp.focused = self.ctx.focus.eql(id);
-
-        if (hovered and self.input.pointer_pressed and self.ctx.active.isNone()) self.ctx.active = id;
-        if (self.ctx.active.eql(id)) {
-            resp.active = true;
-            if (self.input.pointer_released) {
-                if (hovered) resp.clicked = true;
-                self.ctx.active = Id.none;
-            }
-        }
-        if (!enabled and self.ctx.active.eql(id)) self.ctx.active = Id.none;
-
-        resp.hover_t = self.ctx.animate(.{ .h = id.h ^ hover_salt }, if (hovered) 1 else 0, self.theme.anim_rate, self.input.dt);
-        resp.press_t = self.ctx.animate(
-            .{ .h = id.h ^ press_salt },
-            if (resp.active and hovered) 1 else 0,
-            self.theme.anim_rate * 1.6,
-            self.input.dt,
-        );
-        return resp;
+        return respond_widget.respond(self, id, r, focusable, enabled);
     }
 
     pub fn requestFocus(self: *Ui, id: Id) void {
@@ -646,19 +449,8 @@ pub const Ui = struct {
 
     /// Tab / shift-Tab, against the focus ring the previous frame built. Done
     /// before the body runs, so the widget it lands on sees the focus this frame.
-    fn handleFocusKeys(self: *Ui) void {
-        const list = self.focusables_prev.items;
-        if (!self.input.keyPressed(.tab) or list.len == 0) return;
-        const delta: isize = if (self.input.shift) -1 else 1;
-        var idx: isize = 0;
-        for (list, 0..) |id, i| {
-            if (id.eql(self.ctx.focus)) {
-                idx = @as(isize, @intCast(i)) + delta;
-                break;
-            }
-        }
-        const n: isize = @intCast(list.len);
-        self.ctx.focus = list[@intCast(@mod(idx, n))];
+    pub fn handleFocusKeys(self: *Ui) void {
+        return helpers_widget.handleFocusKeys(self);
     }
 
     // --------------------------------------------------------------- containers
@@ -671,7 +463,7 @@ pub const Ui = struct {
         return container_widget.container(self, id, style, body);
     }
 
-    const Measured = struct {
+    pub const Measured = struct {
         content: Vec2,
         fixed_main: f32 = 0,
         fill_content: f32 = 0,
@@ -681,52 +473,11 @@ pub const Ui = struct {
     };
 
     pub fn drawFrame(style: Style, content_rect: Rect, measured: Measured) LayoutFrame {
-        var frame = LayoutFrame{
-            .mode = .draw,
-            .dir = style.dir,
-            .content = content_rect,
-            .gap = style.gap,
-            .cross_align = style.cross_align,
-            .cursor = if (style.dir == .x) content_rect.x else content_rect.y,
-            .cross = if (style.dir == .x) content_rect.h else content_rect.w,
-            .fixed_main = measured.fixed_main,
-            .fill_content = measured.fill_content,
-            .weight = measured.weight,
-            .gaps = measured.gaps,
-            .max_cross = measured.max_cross,
-        };
-        frame.fill_extent = @max(0, frame.contentMain() - measured.fixed_main);
-        return frame;
+        return helpers_widget.drawFrame(style, content_rect, measured);
     }
 
     pub fn measureContainer(self: *Ui, style: Style, avail: Vec2, body: anytype) Error!Measured {
-        const was_measuring = self.measuring;
-        self.measuring = true;
-        self.pushLayout(.{
-            .mode = .measure,
-            .dir = style.dir,
-            .content = Rect.init(0, 0, avail.x, avail.y),
-            .gap = style.gap,
-            .cross_align = style.cross_align,
-            .cross = avail.x,
-        });
-        try body.run(self);
-        const frame = self.layouts[self.depth - 1];
-        self.popLayout();
-        self.measuring = was_measuring;
-
-        const main = frame.fixed_main + frame.fill_content;
-        return .{
-            .content = if (style.dir == .x)
-                Vec2{ .x = main, .y = frame.max_cross }
-            else
-                Vec2{ .x = frame.max_cross, .y = main },
-            .fixed_main = frame.fixed_main,
-            .fill_content = frame.fill_content,
-            .weight = frame.weight,
-            .gaps = frame.gaps,
-            .max_cross = frame.max_cross,
-        };
+        return measure_container_widget.measureContainer(self, style, avail, body);
     }
 
     // ----------------------------------------------------------------- widgets
@@ -810,34 +561,7 @@ pub const Ui = struct {
     /// viewport cannot disagree about what a wheel event does or where the thumb
     /// sits. Returns the offset to lay the children out at.
     pub fn scrollRegion(self: *Ui, key: Id, r: Rect, view: Rect, content_h: f32, bar: f32, pad: Edges) Error!f32 {
-        const max_scroll = @max(0, content_h - view.h);
-
-        var scroll = self.ctx.scrollOf(key).y;
-        if (r.contains(self.input.pointer) and !self.input.scroll.eql(Vec2.zero)) {
-            // Positive `y` is "scroll down", which moves the content up: the
-            // offset grows.
-            scroll += self.input.scroll.y;
-            self.markDirty();
-        }
-        scroll = std.math.clamp(scroll, 0, max_scroll);
-
-        const fit = content_h <= view.h + 0.5;
-        if (!fit) {
-            const thumb_h = @max(24, view.h * (view.h / content_h));
-            const track = Rect.init(view.x + view.w, r.y + pad.t, bar, r.h - pad.sum(.y));
-            const thumb = Rect.init(track.x, track.y + (track.h - thumb_h) * (if (max_scroll > 0) scroll / max_scroll else 0), bar, thumb_h);
-            const resp = self.respond(self.idOf("bar"), track, false, true);
-            if (resp.active and !self.input.pointer_released) {
-                const rel = (self.input.pointer.y - track.y - thumb_h * 0.5) / @max(1, track.h - thumb_h);
-                scroll = std.math.clamp(rel, 0, 1) * max_scroll;
-                self.markDirty();
-            }
-            const rail = Rect.init(track.x + 2, track.y, @max(2, track.w - 4), track.h);
-            try self.paintRounded(rail, rail.w * 0.5, self.theme.track.withAlpha(0.6), 0, Color.transparent);
-            try self.paintRounded(Rect.init(thumb.x + 2, thumb.y, @max(2, thumb.w - 4), thumb.h), rail.w * 0.5, self.theme.border, 0, Color.transparent);
-        }
-        self.ctx.setScroll(key, .{ .x = 0, .y = scroll });
-        return scroll;
+        return scroll_region_widget.scrollRegion(self, key, r, view, content_h, bar, pad);
     }
 
     // ------------------------------------------------------------- virtual list
@@ -902,14 +626,7 @@ pub const Ui = struct {
     // ---------------------------------------------------------------- helpers
 
     pub fn wrapText(self: *Ui, content: []const u8, size: f32, max_width: f32) []font.Line {
-        const a = self.arena.allocator();
-        if (content.len == 0) {
-            const one = a.alloc(font.Line, 1) catch return &.{};
-            one[0] = .{ .start = 0, .len = 0 };
-            return one;
-        }
-        const buf = a.alloc(font.Line, @min(self.max_lines, content.len + 1)) catch return &.{};
-        return font.wrap(content, size, max_width, buf);
+        return helpers_widget.wrapText(self, content, size, max_width);
     }
 };
 
