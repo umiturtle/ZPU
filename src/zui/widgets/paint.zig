@@ -46,6 +46,18 @@ pub fn paintText(self: *Ui, x: f32, baseline: f32, size: f32, color: Color, cont
     });
 }
 
+/// Pushes a clip rectangle onto the clip stack.
+pub fn pushClip(self: *Ui, r: Rect) Ui.Error!void {
+    self.clip = self.clip.intersect(r);
+    try self.list.push(self.alloc, .{ .push_clip = self.clip });
+}
+
+/// Pops the clip rectangle from the clip stack.
+pub fn popClip(self: *Ui, previous: Rect) Ui.Error!void {
+    self.clip = previous;
+    try self.list.push(self.alloc, .{ .pop_clip = {} });
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

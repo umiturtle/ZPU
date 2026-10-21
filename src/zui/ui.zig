@@ -61,6 +61,8 @@ const helpers_widget = @import("widgets/helpers.zig");
 const paint_widget = @import("widgets/paint.zig");
 const lifecycle_widget = @import("widgets/lifecycle.zig");
 const id_widget = @import("widgets/id.zig");
+const layout_widget = @import("widgets/layout.zig");
+const focus_widget = @import("widgets/focus.zig");
 
 const Alignment = types.Alignment;
 const Axis = types.Axis;
@@ -84,165 +86,32 @@ pub const MockBackend = config_mod.MockBackend;
 /// and a fixed array so pushing can never fail.
 pub const max_depth = 32;
 
-pub const Theme = struct {
-    text: Color = Color.hex(0xe6e9ef, 1),
-    text_dim: Color = Color.hex(0x9aa3b2, 1),
-    bg: Color = Color.hex(0x171a21, 1),
-    surface: Color = Color.hex(0x232838, 1),
-    border: Color = Color.hex(0x3a4257, 1),
-    track: Color = Color.hex(0x11141b, 1),
-    accent: Color = Color.hex(0x5b8cff, 1),
-    accent_text: Color = Color.hex(0xffffff, 1),
-    widget: Color = Color.hex(0x2c3242, 1),
-    widget_hover: Color = Color.hex(0x39415a, 1),
-    radio_dot: Color = Color.hex(0x9fb4ff, 1),
-
-    font_size: f32 = 14,
-    item_h: f32 = 26,
-    radius: f32 = 5,
-    gap: f32 = 6,
-    pad: f32 = 8,
-    /// How fast hover/press glows settle, in 1/seconds.
-    anim_rate: f32 = 18,
-
-    pub const dark = Theme{};
-    pub const light = Theme{
-        .text = Color.hex(0x1b1e26, 1),
-        .text_dim = Color.hex(0x5b6273, 1),
-        .bg = Color.hex(0xf3f4f7, 1),
-        .surface = Color.hex(0xffffff, 1),
-        .border = Color.hex(0xc9cfdd, 1),
-        .track = Color.hex(0xdfe3ec, 1),
-        .accent = Color.hex(0x2f6bff, 1),
-        .widget = Color.hex(0xe3e7f0, 1),
-        .widget_hover = Color.hex(0xd2d9e8, 1),
-        .radio_dot = Color.hex(0x2f6bff, 1),
-    };
-};
+// Re-export Theme from theme.zig
+pub const Theme = @import("theme.zig").Theme;
 
 /// What a widget or a container asks for. `w`/`h` are along *screen* axes and are
 /// mapped onto the current container's main/cross axis by the layout.
-pub const Style = struct {
-    w: Size = .auto,
-    h: Size = .auto,
-    pad: Edges = .{},
-    /// Distance to the next sibling (containers: between children).
-    gap: f32 = 0,
-    dir: Axis = .y,
-    /// Cross-axis placement of this container's children.
-    cross_align: Alignment = .start,
-    /// Main-axis placement of the whole group when there is slack.
-    justify: Alignment = .start,
-    clip: bool = false,
-    bg: Color = Color.transparent,
-    border: f32 = 0,
-    border_color: Color = Color.hex(0xffffff, 0),
-    radius: f32 = 0,
-    min_w: f32 = 0,
-    min_h: f32 = 0,
-
-    pub fn sizeAlong(self: Style, axis: Axis) Size {
-        return if (axis == .x) self.w else self.h;
-    }
-
-    /// The minimum on `axis`; a box is never laid out smaller than this.
-    pub fn minAlong(self: Style, axis: Axis) f32 {
-        return if (axis == .x) self.min_w else self.min_h;
-    }
-};
+pub const Style = @import("style.zig").Style;
 
 /// What a widget reports about itself for this frame. Every field is a result of
 /// this frame's input plus the retained interaction state, so a widget never has
 /// to be asked twice.
-pub const Response = struct {
-    hovered: bool = false,
-    /// The pointer is down and this widget owns the press.
-    active: bool = false,
-    /// Press *and* release inside, or a keyboard activation: the edge that fires
-    /// an action.
-    clicked: bool = false,
-    focused: bool = false,
-    disabled: bool = false,
-    /// Animated `0..1` hover glow and press amount.
-    hover_t: f32 = 0,
-    press_t: f32 = 0,
-    rect: Rect = .{},
-};
+pub const Response = @import("response.zig").Response;
 
 const Mode = enum { measure, draw };
 
 /// One container's layout state; the top of the stack is where the next widget
 /// goes.
-pub const LayoutFrame = struct {
-    mode: Mode,
-    dir: Axis = .y,
-    /// Content box (draw) or the offered space (measure).
-    content: Rect = .{},
-    gap: f32 = 0,
-    cross_align: Alignment = .start,
-    /// Main-axis cursor and cross extent, in absolute coordinates.
-    cursor: f32 = 0,
-    cross: f32 = 0,
-    /// Accumulated extents of the non-`fill` children (draw: what is fixed;
-    /// measure: the same, plus gaps).
-    fixed_main: f32 = 0,
-    /// What the `fill` children asked for by content, and their total weight.
-    fill_content: f32 = 0,
-    weight: f32 = 0,
-    gaps: f32 = 0,
-    max_cross: f32 = 0,
-    children: usize = 0,
-    /// Space the `fill` children share (draw mode).
-    fill_extent: f32 = 0,
+pub const LayoutFrame = @import("layout_frame.zig").LayoutFrame;
 
-    pub fn contentMain(self: *const LayoutFrame) f32 {
-        return if (self.dir == .x) self.content.w else self.content.h;
-    }
-
-    fn contentCross(self: *const LayoutFrame) f32 {
-        return if (self.dir == .x) self.content.h else self.content.w;
-    }
-
-    fn cursorStart(self: *const LayoutFrame) f32 {
-        return if (self.dir == .x) self.content.x else self.content.y;
-    }
-
-    /// What is left of the content box's main axis.
-    pub fn remaining(self: *const LayoutFrame) f32 {
-        return @max(0, self.contentMain() - (self.cursor - self.cursorStart()));
-    }
-};
-
-pub const FrameResult = struct {
-    rebuilt: bool,
-    /// Nothing could have changed and the body was not called: the display list
-    /// is last frame's, command for command.
-    skipped: bool,
-    commands: usize,
-    revision: u64,
-};
+pub const FrameResult = @import("frame_result.zig").FrameResult;
 
 /// A tooltip waiting to be painted at the end of the frame.
-pub const Tip = struct {
-    anchor: Rect,
-    text: []const u8,
-};
+pub const Tip = @import("tip.zig").Tip;
 
-pub const Options = struct {
-    width: f32 = 320,
-    height: f32 = 200,
-    theme: Theme = Theme.dark,
-    /// Cap on the lines one label may wrap to: the arena is not a bin.
-    max_lines: usize = 64,
-};
+pub const Options = @import("options.zig").Options;
 
-pub const Stats = struct {
-    frames: u64,
-    rebuilt: u64,
-    skipped: u64,
-    commands: usize,
-    revision: u64,
-};
+pub const Stats = @import("stats.zig").Stats;
 
 pub const Ui = struct {
     /// The error set of a frame. Widgets allocate (display list, wrapped text),
@@ -343,13 +212,11 @@ pub const Ui = struct {
     // ---------------------------------------------------------------- painting
 
     pub fn pushClip(self: *Ui, r: Rect) Error!void {
-        self.clip = self.clip.intersect(r);
-        try self.list.push(self.alloc, .{ .push_clip = self.clip });
+        return paint_widget.pushClip(self, r);
     }
 
     pub fn popClip(self: *Ui, previous: Rect) Error!void {
-        self.clip = previous;
-        try self.list.push(self.alloc, .{ .pop_clip = {} });
+        return paint_widget.popClip(self, previous);
     }
 
     pub fn paintRect(self: *Ui, r: Rect, color: Color) Error!void {
@@ -377,28 +244,24 @@ pub const Ui = struct {
     // ------------------------------------------------------------------ layout
 
     pub fn top(self: *Ui) *LayoutFrame {
-        return &self.layouts[self.depth - 1];
+        return layout_widget.top(self);
     }
 
     pub fn pushLayout(self: *Ui, frame: LayoutFrame) void {
-        std.debug.assert(self.depth < max_depth);
-        self.layouts[self.depth] = frame;
-        self.depth += 1;
+        return layout_widget.pushLayout(self, frame);
     }
 
     pub fn popLayout(self: *Ui) void {
-        std.debug.assert(self.depth > 0);
-        self.depth -= 1;
+        return layout_widget.popLayout(self);
     }
 
     /// Space a child may use for wrapping: the container's cross extent.
     pub fn available(self: *Ui) Vec2 {
-        const lf = self.top();
-        return .{ .x = lf.contentCross(), .y = lf.contentMain() };
+        return layout_widget.available(self);
     }
 
     pub fn contentWidth(self: *Ui) f32 {
-        return self.top().contentCross();
+        return layout_widget.contentWidth(self);
     }
 
     /// Reserves a box: accumulates in the measure pass, returns the placement
@@ -429,7 +292,7 @@ pub const Ui = struct {
     }
 
     pub fn popId(self: *Ui) void {
-        self.id_top -= 1;
+        return id_widget.popId(self);
     }
 
     // -------------------------------------------------------------- interaction
@@ -439,11 +302,11 @@ pub const Ui = struct {
     }
 
     pub fn requestFocus(self: *Ui, id: Id) void {
-        if (!self.measuring) self.ctx.focus = id;
+        return focus_widget.requestFocus(self, id);
     }
 
     pub fn clearFocus(self: *Ui) void {
-        if (!self.measuring) self.ctx.focus = Id.none;
+        return focus_widget.clearFocus(self);
     }
 
     /// Tab / shift-Tab, against the focus ring the previous frame built. Done
@@ -462,14 +325,7 @@ pub const Ui = struct {
         return container_widget.container(self, id, style, body);
     }
 
-    pub const Measured = struct {
-        content: Vec2,
-        fixed_main: f32 = 0,
-        fill_content: f32 = 0,
-        weight: f32 = 0,
-        gaps: f32 = 0,
-        max_cross: f32 = 0,
-    };
+    pub const Measured = @import("measured.zig").Measured;
 
     pub fn drawFrame(style: Style, content_rect: Rect, measured: Measured) LayoutFrame {
         return helpers_widget.drawFrame(style, content_rect, measured);
@@ -637,56 +493,7 @@ pub const Ui = struct {
 /// const MyUi = UiWith(.{ .quality = .high, .animations = false });
 /// var ui = MyUi.init(alloc, .{});
 /// ```
-pub fn UiWith(comptime cfg: Config) type {
-    return struct {
-        pub const config = cfg;
-        pub const Inner = Ui;
-
-        inner: Ui,
-
-        pub fn init(alloc: std.mem.Allocator, opts: Options) @This() {
-            return .{
-                .inner = Ui.init(alloc, opts),
-            };
-        }
-
-        pub fn deinit(self: *@This()) void {
-            self.inner.deinit();
-        }
-
-        /// Check if animations are enabled for this config (comptime-known)
-        pub fn animationsEnabled() bool {
-            return cfg.animations;
-        }
-
-        /// Check if tooltips are enabled for this config (comptime-known)
-        pub fn tooltipsEnabled() bool {
-            return cfg.tooltips;
-        }
-
-        /// Check if keyboard navigation is enabled for this config (comptime-known)
-        pub fn keyboardNavEnabled() bool {
-            return cfg.keyboard_nav;
-        }
-
-        /// Get the quality level for this config (comptime-known)
-        pub fn qualityLevel() Quality {
-            return cfg.quality;
-        }
-
-        /// Get the antialiasing level based on quality (comptime-known)
-        pub fn antialiasLevel() u2 {
-            return cfg.quality.antialiasLevel();
-        }
-
-        /// Access the underlying Ui for full API
-        pub fn ui(self: *@This()) *Ui {
-            return &self.inner;
-        }
-
-        pub const ui_ptr = ui;
-    };
-}
+pub const UiWith = @import("ui_with.zig").UiWith;
 
 /// Salts so hover and press animations of the same widget are different ids.
 const hover_salt: u64 = 0x9E3779B97F4A7C15;

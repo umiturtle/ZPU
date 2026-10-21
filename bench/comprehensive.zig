@@ -109,6 +109,55 @@ pub fn main(init: std.process.Init) !void {
             const elapsed = start.untilNow(init.io, clock);
             printResult("  relu(add(a,b))", elapsed.nanoseconds, chain_iters);
         }
+        
+        // Fused operations (for comparison)
+        if (n >= 100_000) {
+            std.debug.print("\n  [Fused Operations]\n", .{});
+            
+            {
+                const start = clock.now(init.io);
+                var i: usize = 0;
+                while (i < chain_iters) : (i += 1) {
+                    const r = try zpu.fusedAddRelu(a, b);
+                    _ = r;
+                }
+                const elapsed = start.untilNow(init.io, clock);
+                printResult("  fusedAddRelu(a,b)", elapsed.nanoseconds, chain_iters);
+            }
+            
+            {
+                const start = clock.now(init.io);
+                var i: usize = 0;
+                while (i < chain_iters) : (i += 1) {
+                    const r = try zpu.fusedAddSigmoid(a, b);
+                    _ = r;
+                }
+                const elapsed = start.untilNow(init.io, clock);
+                printResult("  fusedAddSigmoid(a,b)", elapsed.nanoseconds, chain_iters);
+            }
+            
+            {
+                const start = clock.now(init.io);
+                var i: usize = 0;
+                while (i < chain_iters) : (i += 1) {
+                    const r = try zpu.fusedGateSigmoid(a, b);
+                    _ = r;
+                }
+                const elapsed = start.untilNow(init.io, clock);
+                printResult("  fusedGateSigmoid(a,b)", elapsed.nanoseconds, chain_iters);
+            }
+            
+            {
+                const start = clock.now(init.io);
+                var i: usize = 0;
+                while (i < chain_iters) : (i += 1) {
+                    const r = try zpu.fusedMulRelu(a, b);
+                    _ = r;
+                }
+                const elapsed = start.untilNow(init.io, clock);
+                printResult("  fusedMulRelu(a,b)", elapsed.nanoseconds, chain_iters);
+            }
+        }
     }
     
     // Matrix operations
