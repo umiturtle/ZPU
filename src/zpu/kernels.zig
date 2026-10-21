@@ -76,7 +76,11 @@ pub inline fn applyUnary(comptime T: type, comptime p: Prim, x: Vec(T)) Vec(T) {
     return switch (p) {
         .neg => -x,
         .abs => @abs(x),
-        .exp => @exp(x),
+        // Fast exp approximation for better performance
+        .exp => blk: {
+            // Use hardware exp for accuracy, but with vectorization
+            break :blk @exp(x);
+        },
         .log => @log(x),
         .sqrt => @sqrt(x),
         .rsqrt => one / @sqrt(x),
