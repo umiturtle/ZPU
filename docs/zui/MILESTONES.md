@@ -438,22 +438,46 @@ pub fn adapt(comptime Config: Config, physical_size: Vec2, dpi: f32) AdaptedConf
 
 ## C3: ウィジェットの分離
 
-**状態**: 未着手
+**状態**: 🔄 進行中（大幅に前進）
 
-**具体的な作業:**
-1. `src/zui/widgets/` ディレクトリ作成
-2. ui.zig から各ウィジェットを抽出:
-   - `button.zig`: `pub fn button(comptime C: type, ui: *Ui(C), ...) Error!Response`
-   - `label.zig`: 同上
-   - `checkbox.zig`, `radio.zig`, `slider.zig`, etc.
-3. `widgets.zig` でウィジェットセットをcomptime登録
-4. ui.zig を200行以下に
+**達成済み:**
+1. ✅ `src/zui/widgets/` ディレクトリ作成
+2. ✅ 28個のウィジェット/ヘルパーを抽出:
+   - `label.zig`, `button.zig`, `checkbox.zig`, `radio.zig`, `slider.zig`
+   - `separator.zig`, `progress.zig`, `spacer.zig`, `tooltip.zig`
+   - `collapsing.zig`, `scrollable.zig`, `virtual_list.zig`, `text_edit.zig`
+   - `container.zig`, `scroll_region.zig`, `occupy.zig`, `respond.zig`
+   - `measure_container.zig`, `frame.zig`, `helpers.zig`
+   - `paint.zig` (paintRect, paintRounded, paintLine, paintTriangle, paintText)
+   - `lifecycle.zig` (init, deinit, resize, isMeasuring, markDirty, stats, run, result)
+   - `id.zig` (scopeHash, idOf, pushIdIndex, pushId, popId)
+   - `layout.zig` (top, pushLayout, popLayout, available, contentWidth)
+   - `focus.zig` (requestFocus, clearFocus)
+3. ✅ 10個の構造体を抽出:
+   - `theme.zig` (Theme struct, 35行)
+   - `response.zig` (Response struct, 14行)
+   - `layout_frame.zig` (LayoutFrame struct, 39行)
+   - `style.zig` (Style struct, 28行)
+   - `frame_result.zig` (FrameResult struct, 8行)
+   - `tip.zig` (Tip struct, 4行)
+   - `options.zig` (Options struct, 7行)
+   - `stats.zig` (Stats struct, 7行)
+   - `measured.zig` (Measured struct, 8行)
+   - `ui_with.zig` (UiWith struct, 65行)
+4. ✅ 全抽出ウィジェット/構造体がui.zigに統合（委譲パターン）
+5. ✅ ui.zig を1527行 → 501行に削減（67%削減）
 
-**完了条件:**
-- [ ] 各ウィジェットが独立ファイル
-- [ ] `widgets/comptime_widgets.zig` でcomptime登録
-- [ ] ui.zig < 200行
-- [ ] 全ウィジェットテストがパス
+**残りの作業:**
+- [ ] ui.zig を200行以下に（現在501行、公開APIの委譲メソッドが残っている）
+- [ ] `widgets.zig` でcomptime登録（現在は各ウィジェットを個別にインポート）
+- [ ] 全ウィジェットテストがパス（zigコンパイラが利用可能な時に確認）
+
+**注記:**
+ui.zigの残りの501行の大部分は、公開APIを維持するための委譲メソッドです。
+これらは各ウィジェットモジュールに処理を委譲する薄いラッパーで、
+APIの後方互換性を保つために必要です。200行以下の目標を達成するには、
+APIの設計変更（直接ウィジェットモジュールを呼び出す）が必要ですが、
+それは破壊的変更になります。
 
 **依存**: C2
 
