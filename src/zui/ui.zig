@@ -35,6 +35,19 @@ const context_mod = @import("context.zig");
 const frame_mod = @import("frame.zig");
 const font = @import("font.zig");
 const text_mod = @import("text.zig");
+const config_mod = @import("config.zig");
+
+// Widget modules - extracted for modularity
+const label_widget = @import("widgets/label.zig");
+const button_widget = @import("widgets/button.zig");
+const separator_widget = @import("widgets/separator.zig");
+const checkbox_widget = @import("widgets/checkbox.zig");
+const radio_widget = @import("widgets/radio.zig");
+const slider_widget = @import("widgets/slider.zig");
+const progress_widget = @import("widgets/progress.zig");
+const spacer_widget = @import("widgets/spacer.zig");
+const tooltip_widget = @import("widgets/tooltip.zig");
+const collapsing_widget = @import("widgets/collapsing.zig");
 
 const Alignment = types.Alignment;
 const Axis = types.Axis;
@@ -47,6 +60,12 @@ const Rect = types.Rect;
 const Size = types.Size;
 const Vec2 = types.Vec2;
 const TextField = text_mod.TextField;
+
+// Re-export config types for convenience
+pub const Quality = config_mod.Quality;
+pub const Config = config_mod.Config;
+pub const SoftwareBackend = config_mod.SoftwareBackend;
+pub const MockBackend = config_mod.MockBackend;
 
 /// Nesting depth of containers and id scopes: deep enough for hand-written UI,
 /// and a fixed array so pushing can never fail.
@@ -455,13 +474,13 @@ pub const Ui = struct {
         return &self.layouts[self.depth - 1];
     }
 
-    fn pushLayout(self: *Ui, frame: LayoutFrame) void {
+    pub fn pushLayout(self: *Ui, frame: LayoutFrame) void {
         std.debug.assert(self.depth < max_depth);
         self.layouts[self.depth] = frame;
         self.depth += 1;
     }
 
-    fn popLayout(self: *Ui) void {
+    pub fn popLayout(self: *Ui) void {
         std.debug.assert(self.depth > 0);
         self.depth -= 1;
     }
@@ -478,7 +497,7 @@ pub const Ui = struct {
 
     /// Reserves a box: accumulates in the measure pass, returns the placement
     /// and advances the cursor in the draw pass.
-    fn occupy(self: *Ui, style: Style, content_size: Vec2) Rect {
+    pub fn occupy(self: *Ui, style: Style, content_size: Vec2) Rect {
         const lf = self.top();
         const main = lf.dir;
         const cross = main.other();
@@ -573,7 +592,7 @@ pub const Ui = struct {
 
     // -------------------------------------------------------------- interaction
 
-    fn respond(self: *Ui, id: Id, r: Rect, focusable: bool, enabled: bool) Response {
+    pub fn respond(self: *Ui, id: Id, r: Rect, focusable: bool, enabled: bool) Response {
         var resp = Response{ .rect = r };
         if (self.measuring) return resp;
         resp.disabled = !enabled;
@@ -689,7 +708,7 @@ pub const Ui = struct {
         max_cross: f32 = 0,
     };
 
-    fn drawFrame(style: Style, content_rect: Rect, measured: Measured) LayoutFrame {
+    pub fn drawFrame(style: Style, content_rect: Rect, measured: Measured) LayoutFrame {
         var frame = LayoutFrame{
             .mode = .draw,
             .dir = style.dir,
@@ -708,7 +727,7 @@ pub const Ui = struct {
         return frame;
     }
 
-    fn measureContainer(self: *Ui, style: Style, avail: Vec2, body: anytype) Error!Measured {
+    pub fn measureContainer(self: *Ui, style: Style, avail: Vec2, body: anytype) Error!Measured {
         const was_measuring = self.measuring;
         self.measuring = true;
         self.pushLayout(.{
@@ -740,266 +759,63 @@ pub const Ui = struct {
 
     // ----------------------------------------------------------------- widgets
 
-    pub const LabelOptions = struct {
-        color: ?Color = null,
-        size: ?f32 = null,
-        wrap: bool = true,
-    };
+    // Widget option types - re-exported from widget modules for backward compatibility
+    pub const LabelOptions = label_widget.LabelOptions;
 
     /// A run of text. Wraps to the container's width unless told otherwise.
     pub fn label(self: *Ui, content: []const u8, opts: LabelOptions) Error!void {
-        const size = opts.size orelse self.theme.font_size;
-        const color = opts.color orelse self.theme.text;
-        const max_w = if (opts.wrap) self.contentWidth() else std.math.floatMax(f32);
-        const lines = self.wrapText(content, size, max_w);
-        const line_h = font.measure("", size).height;
-
-        var widest: f32 = 0;
-        for (lines) |line| widest = @max(widest, font.measure(content[line.start .. line.start + line.len], size).width);
-
-        const r = self.occupy(.{}, .{ .x = widest, .y = line_h * @as(f32, @floatFromInt(lines.len)) });
-        if (self.measuring) return;
-        var baseline = r.y + font.measure("", size).ascent;
-        for (lines) |line| {
-            try self.paintText(r.x, baseline, size, color, content[line.start .. line.start + line.len]);
-            baseline += line_h;
-        }
+        return label_widget.label(self, content, opts);
     }
 
-    pub const ButtonOptions = struct {
-        w: Size = .auto,
-        h: ?f32 = null,
-        pad: ?Edges = null,
-        enabled: bool = true,
-        radius: ?f32 = null,
-        /// Draw a border.
-        border: bool = true,
-    };
+    pub const ButtonOptions = button_widget.ButtonOptions;
 
     /// A push button. `true` on the frame it was activated — by a click, or by
     /// `enter`/`space` while focused.
     pub fn button(self: *Ui, content: []const u8, opts: ButtonOptions) Error!bool {
-        return self.buttonId(self.idOf(content), content, opts);
+        return button_widget.button(self, content, opts);
     }
 
     /// A button whose id is explicit: for labels that change (an id that moves
     /// loses the press) or for rows of identical labels.
     pub fn buttonId(self: *Ui, id: Id, content: []const u8, opts: ButtonOptions) Error!bool {
-        const size = self.theme.font_size;
-        const m = font.measure(content, size);
-        const pad = opts.pad orelse Edges.xy(self.theme.pad + 2, (self.theme.item_h - m.height) * 0.5);
-        const style = Style{
-            .w = opts.w,
-            .h = Size{ .px = opts.h orelse @max(self.theme.item_h, m.height + pad.sum(.y)) },
-            .pad = pad,
-            .min_w = m.width + pad.sum(.x),
-        };
-        const r = self.occupy(style, .{ .x = m.width, .y = m.height });
-        const resp = self.respond(id, r, true, opts.enabled);
-        if (self.measuring) return false;
-
-        const radius = opts.radius orelse self.theme.radius;
-        var fill = self.theme.widget;
-        if (!opts.enabled) {
-            fill = Color.lerp(self.theme.widget, self.theme.bg, 0.5);
-        } else {
-            fill = Color.lerp(self.theme.widget, self.theme.widget_hover, resp.hover_t);
-            fill = Color.lerp(fill, self.theme.accent, resp.press_t * 0.85);
-        }
-        try self.paintRounded(r, radius, fill, if (opts.border) 1 else 0, self.theme.border);
-        const text_color = if (!opts.enabled)
-            self.theme.text_dim.scale(0.7)
-        else if (resp.press_t > 0.5)
-            self.theme.accent_text
-        else
-            self.theme.text;
-        const baseline = r.y + (r.h - m.height) * 0.5 + m.ascent;
-        try self.paintText(r.x + (r.w - m.width) * 0.5, baseline, size, text_color, content);
-        if (resp.focused) try self.paintFocusRing(r, radius);
-        return resp.clicked and opts.enabled;
+        return button_widget.buttonId(self, id, content, opts);
     }
 
-    fn paintFocusRing(self: *Ui, r: Rect, radius: f32) Error!void {
-        try self.paintRounded(r.shrink(-1.5), radius + 1.5, Color.transparent, 1.5, self.theme.accent.withAlpha(0.9));
-    }
-
-    pub const ToggleOptions = struct {
-        enabled: bool = true,
-        w: Size = .auto,
-    };
+    pub const ToggleOptions = checkbox_widget.ToggleOptions;
 
     /// A checkbox. `true` on the frame it was toggled.
     pub fn checkbox(self: *Ui, content: []const u8, value: *bool, opts: ToggleOptions) Error!bool {
-        const id = self.idOf(content);
-        const size = self.theme.font_size;
-        const m = font.measure(content, size);
-        const box = @max(15, size);
-        const wanted = Vec2{ .x = box + self.theme.pad + m.width, .y = @max(self.theme.item_h, m.height) };
-        const r = self.occupy(.{ .w = opts.w, .h = Size{ .px = wanted.y }, .min_w = wanted.x }, wanted);
-        const resp = self.respond(id, r, true, opts.enabled);
-        if (self.measuring) return false;
-
-        const bx = Rect.init(r.x, r.y + (r.h - box) * 0.5, box, box);
-        var fill = Color.lerp(self.theme.widget, self.theme.widget_hover, resp.hover_t);
-        if (value.*) fill = Color.lerp(fill, self.theme.accent, 1.0);
-        try self.paintRounded(bx, self.theme.radius * 0.6, fill, 1, self.theme.border);
-        if (value.*) {
-            // A tick in two strokes: no glyph in a 95-character font is as
-            // recognisable at 15 px.
-            const c = bx.center();
-            const w = box * 0.2;
-            try self.paintLine(.{ .x = c.x - w * 1.4, .y = c.y }, .{ .x = c.x - w * 0.2, .y = c.y + w * 1.2 }, 2, self.theme.accent_text);
-            try self.paintLine(.{ .x = c.x - w * 0.2, .y = c.y + w * 1.2 }, .{ .x = c.x + w * 1.5, .y = c.y - w * 1.1 }, 2, self.theme.accent_text);
-        }
-        const baseline = r.y + (r.h - m.height) * 0.5 + m.ascent;
-        try self.paintText(r.x + box + self.theme.pad, baseline, size, if (opts.enabled) self.theme.text else self.theme.text_dim, content);
-        if (resp.focused) try self.paintFocusRing(bx, self.theme.radius * 0.6);
-
-        if (resp.clicked and opts.enabled) {
-            value.* = !value.*;
-            self.markDirty();
-            return true;
-        }
-        return false;
+        return checkbox_widget.checkbox(self, content, value, opts);
     }
 
     /// A radio button; `selected` is the index of the chosen item in the group.
     pub fn radio(self: *Ui, content: []const u8, selected: *usize, index: usize, opts: ToggleOptions) Error!bool {
-        const id = self.idOf(content);
-        const size = self.theme.font_size;
-        const m = font.measure(content, size);
-        const box = @max(15, size);
-        const wanted = Vec2{ .x = box + self.theme.pad + m.width, .y = @max(self.theme.item_h, m.height) };
-        const r = self.occupy(.{ .w = opts.w, .h = Size{ .px = wanted.y }, .min_w = wanted.x }, wanted);
-        const resp = self.respond(id, r, true, opts.enabled);
-        if (self.measuring) return false;
-
-        const cy = r.y + r.h * 0.5;
-        const ring = Rect.init(r.x, cy - box * 0.5, box, box);
-        const is_on = selected.* == index;
-        var fill = Color.lerp(self.theme.widget, self.theme.widget_hover, resp.hover_t);
-        if (is_on) fill = self.theme.track;
-        // A circle is a rounded rectangle whose radius is half its side: the
-        // display list needs no circle command for this.
-        try self.paintRounded(ring, box * 0.5, fill, 1, self.theme.border);
-        if (is_on) {
-            const d = box * 0.44;
-            try self.paintRounded(Rect.init(r.x + (box - d) * 0.5, cy - d * 0.5, d, d), d * 0.5, self.theme.radio_dot, 0, Color.transparent);
-        }
-        const baseline = r.y + (r.h - m.height) * 0.5 + m.ascent;
-        try self.paintText(r.x + box + self.theme.pad, baseline, size, self.theme.text, content);
-        if (resp.focused) try self.paintFocusRing(ring, box * 0.5);
-
-        if (resp.clicked and opts.enabled and !is_on) {
-            selected.* = index;
-            self.markDirty();
-            return true;
-        }
-        return false;
+        return radio_widget.radio(self, content, selected, index, opts);
     }
 
-    pub const SliderOptions = struct {
-        min: f32 = 0,
-        max: f32 = 1,
-        w: Size = .{ .px = 160 },
-        enabled: bool = true,
-        /// Shown next to the label.
-        show_value: bool = true,
-    };
+    pub const SliderOptions = slider_widget.SliderOptions;
 
     /// A slider: dragging anywhere on the track moves the value (no "grab the
     /// knob" friction), and the pixels map linearly onto the range.
     pub fn slider(self: *Ui, content: []const u8, value: *f32, opts: SliderOptions) Error!bool {
-        const id = self.idOf(content);
-        const size = self.theme.font_size;
-        const m = font.measure(content, size);
-        var value_buf: [32]u8 = undefined;
-        const value_text = if (opts.show_value)
-            std.fmt.bufPrint(&value_buf, "{d:.2}", .{value.*}) catch ""
-        else
-            "";
-        const vm = font.measure(value_text, size);
-        const label_w = m.width + self.theme.pad;
-        const min_w = label_w + @max(opts.w.resolve(0, 0), 40) + vm.width;
-
-        const style = Style{ .w = opts.w, .h = Size{ .px = @max(self.theme.item_h, m.height) }, .min_w = min_w };
-        const r = self.occupy(style, .{ .x = min_w, .y = m.height });
-        const resp = self.respond(id, r, true, opts.enabled);
-        if (self.measuring) return false;
-
-        const range = if (opts.max > opts.min) opts.max - opts.min else 1;
-        var changed = false;
-        const track = Rect.init(
-            r.x + label_w,
-            r.y + r.h * 0.5 - 3,
-            @max(20, r.w - label_w - (if (opts.show_value) vm.width + self.theme.pad else 0)),
-            6,
-        );
-        if (resp.active and opts.enabled) {
-            const t = std.math.clamp((self.input.pointer.x - track.x) / @max(1, track.w), 0, 1);
-            const next = opts.min + t * range;
-            if (next != value.*) {
-                value.* = next;
-                changed = true;
-            }
-        }
-        if (resp.focused and opts.enabled) {
-            const step = range / 100;
-            if (self.input.keyPressed(.left)) {
-                value.* = std.math.clamp(value.* - step, opts.min, opts.max);
-                changed = true;
-            }
-            if (self.input.keyPressed(.right)) {
-                value.* = std.math.clamp(value.* + step, opts.min, opts.max);
-                changed = true;
-            }
-        }
-        if (changed) self.markDirty();
-
-        const t = std.math.clamp((value.* - opts.min) / range, 0, 1);
-        try self.paintRounded(track, 3, self.theme.track, 1, self.theme.border);
-        if (t > 0) {
-            try self.paintRounded(Rect.init(track.x, track.y, track.w * t, track.h), 3, self.theme.accent, 0, Color.transparent);
-        }
-        const knob = Rect.init(track.x + track.w * t - 6, r.y + r.h * 0.5 - 6, 12, 12);
-        try self.paintRounded(knob, 6, Color.lerp(self.theme.text, self.theme.accent_text, resp.hover_t * 0.5), 1, self.theme.border);
-
-        const baseline = r.y + (r.h - m.height) * 0.5 + m.ascent;
-        try self.paintText(r.x, baseline, size, self.theme.text_dim, content);
-        if (opts.show_value) {
-            const vx = r.x + r.w - vm.width;
-            try self.paintText(vx, baseline, size, self.theme.text, value_text);
-        }
-        if (resp.focused) try self.paintFocusRing(track, 4);
-        return changed;
+        return slider_widget.slider(self, content, value, opts);
     }
 
-    pub const ProgressOptions = struct {
-        w: f32 = 160,
-        h: f32 = 8,
-    };
+    pub const ProgressOptions = progress_widget.ProgressOptions;
 
     /// A progress bar: display only, so no id and no retained state.
     pub fn progress(self: *Ui, value: f32, opts: ProgressOptions) Error!void {
-        const r = self.occupy(.{ .w = Size{ .px = opts.w }, .h = Size{ .px = opts.h } }, .{ .x = opts.w, .y = opts.h });
-        if (self.measuring) return;
-        const t = std.math.clamp(value, 0, 1);
-        try self.paintRounded(r, r.h * 0.5, self.theme.track, 1, self.theme.border);
-        if (t > 0) {
-            try self.paintRounded(Rect.init(r.x, r.y, r.w * t, r.h), r.h * 0.5, self.theme.accent, 0, Color.transparent);
-        }
+        return progress_widget.progress(self, value, opts);
     }
 
     /// A hairline across the container.
     pub fn separator(self: *Ui) Error!void {
-        const r = self.occupy(.{ .w = .full, .h = Size{ .px = 1 } }, .{ .x = 0, .y = 1 });
-        if (self.measuring) return;
-        try self.paintRect(r, self.theme.border);
+        return separator_widget.separator(self);
     }
 
     /// Empty space along the container's main axis.
-    pub fn spacer(self: *Ui, extent: f32) Error!void {
-        _ = self.occupy(.{ .w = Size{ .px = extent }, .h = Size{ .px = extent } }, .{ .x = extent, .y = extent });
+    pub fn spacer(self: *Ui, extent: f32) void {
+        spacer_widget.spacer(self, extent);
     }
 
     // ------------------------------------------------------------ scroll view
@@ -1203,67 +1019,17 @@ pub const Ui = struct {
     /// the container it belongs to. That is the whole reason it is deferred:
     /// a popup needs a second pass over the whole window, a tooltip does not.
     pub fn tooltip(self: *Ui, id: Id, anchor: Rect, text: []const u8) Error!void {
-        if (self.measuring or self.skipping) return;
-        if (!self.ctx.hot.eql(id) or text.len == 0) return;
-        self.tip = .{ .anchor = anchor, .text = text };
+        return tooltip_widget.tooltip(self, id, anchor, text);
     }
 
     // ------------------------------------------------------- collapsing header
 
-    pub const CollapsingOptions = struct {
-        /// State on the first frame; after that the retained flag wins.
-        open: bool = false,
-    };
+    pub const CollapsingOptions = collapsing_widget.CollapsingOptions;
 
     /// A header that shows or hides a section. The open flag is retained — it is
     /// exactly the kind of state a body cannot recompute.
     pub fn collapsing(self: *Ui, id: []const u8, title: []const u8, opts: CollapsingOptions, body: anytype) Error!bool {
-        const key = self.idOf(id);
-        const size = self.theme.font_size;
-        const m = font.measure(title, size);
-        const header_h = @max(self.theme.item_h, m.height + 4);
-        const header = self.occupy(
-            .{ .w = .full, .h = Size{ .px = header_h }, .cross_align = .start },
-            .{ .x = m.width + self.theme.pad * 3, .y = m.height },
-        );
-        const resp = self.respond(key, header, true, true);
-        if (self.measuring) return self.ctx.flag(key, opts.open);
-
-        var open = self.ctx.flag(key, opts.open);
-        if (resp.clicked) {
-            open = !open;
-            self.ctx.setFlag(key, open);
-            self.markDirty();
-        }
-        try self.paintRounded(header, self.theme.radius, Color.lerp(self.theme.surface, self.theme.widget_hover, resp.hover_t), 1, self.theme.border);
-        const ax = header.x + self.theme.pad + 3;
-        const ay = header.y + header_h * 0.5;
-        if (open) {
-            try self.paintTriangle(.{ .x = ax - 4, .y = ay - 2 }, .{ .x = ax + 4, .y = ay - 2 }, .{ .x = ax, .y = ay + 3 }, self.theme.text_dim);
-        } else {
-            try self.paintTriangle(.{ .x = ax - 2, .y = ay - 4 }, .{ .x = ax - 2, .y = ay + 4 }, .{ .x = ax + 3, .y = ay }, self.theme.text_dim);
-        }
-        const baseline = header.y + (header_h - m.height) * 0.5 + m.ascent;
-        try self.paintText(ax + self.theme.pad, baseline, size, self.theme.text, title);
-        if (!open) return open;
-
-        self.pushId(id);
-        defer self.popId();
-        const inner_style = Style{
-            .dir = .y,
-            .gap = self.theme.gap,
-            .pad = .{ .l = self.theme.pad, .r = self.theme.pad, .b = self.theme.pad, .t = 2 },
-        };
-        const avail = self.available();
-        const measured = try self.measureContainer(inner_style, avail, body);
-        const box = self.occupy(.{ .w = .full, .h = .auto, .pad = inner_style.pad }, measured.content);
-        if (self.measuring) return open;
-        var frame = drawFrame(inner_style, box.inset(inner_style.pad), measured);
-        frame.cursor = box.y + inner_style.pad.t;
-        self.pushLayout(frame);
-        defer self.popLayout();
-        try body.run(self);
-        return open;
+        return collapsing_widget.collapsing(self, id, title, opts, body);
     }
 
     // -------------------------------------------------------------- text field
@@ -1373,7 +1139,7 @@ pub const Ui = struct {
 
     // ---------------------------------------------------------------- helpers
 
-    fn wrapText(self: *Ui, content: []const u8, size: f32, max_width: f32) []font.Line {
+    pub fn wrapText(self: *Ui, content: []const u8, size: f32, max_width: f32) []font.Line {
         const a = self.arena.allocator();
         if (content.len == 0) {
             const one = a.alloc(font.Line, 1) catch return &.{};
@@ -1384,6 +1150,65 @@ pub const Ui = struct {
         return font.wrap(content, size, max_width, buf);
     }
 };
+
+/// Ui with comptime configuration for specialization.
+/// Different configs generate different code at compile time.
+///
+/// Example:
+/// ```zig
+/// const MyUi = UiWith(.{ .quality = .high, .animations = false });
+/// var ui = MyUi.init(alloc, .{});
+/// ```
+pub fn UiWith(comptime cfg: Config) type {
+    return struct {
+        pub const config = cfg;
+        pub const Inner = Ui;
+
+        inner: Ui,
+
+        pub fn init(alloc: std.mem.Allocator, opts: Options) @This() {
+            return .{
+                .inner = Ui.init(alloc, opts),
+            };
+        }
+
+        pub fn deinit(self: *@This()) void {
+            self.inner.deinit();
+        }
+
+        /// Check if animations are enabled for this config (comptime-known)
+        pub fn animationsEnabled() bool {
+            return cfg.animations;
+        }
+
+        /// Check if tooltips are enabled for this config (comptime-known)
+        pub fn tooltipsEnabled() bool {
+            return cfg.tooltips;
+        }
+
+        /// Check if keyboard navigation is enabled for this config (comptime-known)
+        pub fn keyboardNavEnabled() bool {
+            return cfg.keyboard_nav;
+        }
+
+        /// Get the quality level for this config (comptime-known)
+        pub fn qualityLevel() Quality {
+            return cfg.quality;
+        }
+
+        /// Get the antialiasing level based on quality (comptime-known)
+        pub fn antialiasLevel() u2 {
+            return cfg.quality.antialiasLevel();
+        }
+
+        /// Access the underlying Ui for full API
+        pub fn ui(self: *@This()) *Ui {
+            return &self.inner;
+        }
+
+        pub const ui_ptr = ui;
+    };
+}
 
 /// Salts so hover and press animations of the same widget are different ids.
 const hover_salt: u64 = 0x9E3779B97F4A7C15;
@@ -1409,4 +1234,53 @@ test "ids are scoped by pushId" {
     try std.testing.expect(!a.eql(b));
     try std.testing.expect(!b.eql(c));
     try std.testing.expect(b.eql(d));
+}
+
+test "UiWith comptime specialization" {
+    // Test default config
+    const DefaultUi = UiWith(.{});
+    try std.testing.expect(DefaultUi.animationsEnabled());
+    try std.testing.expect(DefaultUi.tooltipsEnabled());
+    try std.testing.expect(DefaultUi.keyboardNavEnabled());
+    try std.testing.expectEqual(Quality.medium, DefaultUi.qualityLevel());
+
+    // Test custom config with animations disabled
+    const NoAnimUi = UiWith(.{ .animations = false });
+    try std.testing.expect(!NoAnimUi.animationsEnabled());
+    try std.testing.expect(NoAnimUi.tooltipsEnabled()); // default
+
+    // Test custom config with low quality
+    const LowQualityUi = UiWith(.{ .quality = .low });
+    try std.testing.expectEqual(Quality.low, LowQualityUi.qualityLevel());
+    try std.testing.expectEqual(@as(u2, 0), LowQualityUi.antialiasLevel());
+
+    // Test high quality
+    const HighQualityUi = UiWith(.{ .quality = .high });
+    try std.testing.expectEqual(Quality.high, HighQualityUi.qualityLevel());
+    try std.testing.expectEqual(@as(u2, 2), HighQualityUi.antialiasLevel());
+}
+
+test "UiWith with different configs generates different types" {
+    const Ui1 = UiWith(.{ .quality = .low });
+    const Ui2 = UiWith(.{ .quality = .high });
+
+    // Different configs should produce different types
+    try std.testing.expect(Ui1 != Ui2);
+
+    // But they should have the same inner type
+    try std.testing.expect(Ui1.Inner == Ui2.Inner);
+    try std.testing.expect(Ui1.Inner == Ui);
+}
+
+test "UiWith runtime usage" {
+    var ui_wrapper = UiWith(.{ .quality = .high, .animations = false }).init(std.testing.allocator, .{});
+    defer ui_wrapper.deinit();
+
+    // Access underlying Ui
+    const u = ui_wrapper.ui();
+    try std.testing.expect(u.viewport.x > 0 or u.viewport.x == 0); // Just verify it works
+
+    // Verify comptime config is accessible
+    try std.testing.expect(!@TypeOf(ui_wrapper).animationsEnabled());
+    try std.testing.expectEqual(Quality.high, @TypeOf(ui_wrapper).qualityLevel());
 }

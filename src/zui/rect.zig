@@ -3,11 +3,37 @@
 //! Dependency-free, fully testable rectangle operations.
 
 const std = @import("std");
+const Vec2 = @import("vec2.zig").Vec2;
 
-/// A point or size in 2D space (minimal version for rect operations)
-pub const Vec2 = struct {
-    x: f32 = 0,
-    y: f32 = 0,
+/// Axis type (re-exported from vec2 for convenience)
+pub const Axis = Vec2.Axis;
+
+/// Distances from the four edges of a box.
+pub const Edges = struct {
+    l: f32 = 0,
+    t: f32 = 0,
+    r: f32 = 0,
+    b: f32 = 0,
+
+    pub fn all(v: f32) Edges {
+        return .{ .l = v, .t = v, .r = v, .b = v };
+    }
+
+    pub fn xy(x: f32, y: f32) Edges {
+        return .{ .l = x, .t = y, .r = x, .b = y };
+    }
+
+    pub fn sum(self: Edges, axis: Axis) f32 {
+        return if (axis == .x) self.l + self.r else self.t + self.b;
+    }
+
+    pub fn start(self: Edges, axis: Axis) f32 {
+        return if (axis == .x) self.l else self.t;
+    }
+
+    pub fn end(self: Edges, axis: Axis) f32 {
+        return if (axis == .x) self.r else self.b;
+    }
 };
 
 /// An axis-aligned rectangle.
@@ -25,6 +51,14 @@ pub const Rect = struct {
 
     pub fn fromEdges(x1: f32, y1: f32, x2: f32, y2: f32) Rect {
         return .{ .x = x1, .y = y1, .w = x2 - x1, .h = y2 - y1 };
+    }
+
+    pub fn init(x: f32, y: f32, w: f32, h: f32) Rect {
+        return .{ .x = x, .y = y, .w = w, .h = h };
+    }
+
+    pub fn fromSize(w: f32, h: f32) Rect {
+        return .{ .w = w, .h = h };
     }
 
     pub fn zero() Rect {
@@ -99,6 +133,54 @@ pub const Rect = struct {
             return .{ .x = x1, .y = y1, .w = x2 - x1, .h = y2 - y1 };
         }
         return null;
+    }
+
+    pub fn intersect(self: Rect, other: Rect) Rect {
+        const x0 = @max(self.x, other.x);
+        const y0 = @max(self.y, other.y);
+        const x1 = @min(self.x + self.w, other.x + other.w);
+        const y1 = @min(self.y + self.h, other.y + other.h);
+        return .{ .x = x0, .y = y0, .w = @max(0, x1 - x0), .h = @max(0, y1 - y0) };
+    }
+
+    pub fn isEmpty(self: Rect) bool {
+        return self.w <= 0 or self.h <= 0;
+    }
+
+    pub fn outset(self: Rect, amount: f32) Rect {
+        return .{
+            .x = self.x - amount,
+            .y = self.y - amount,
+            .w = self.w + 2 * amount,
+            .h = self.h + 2 * amount,
+        };
+    }
+
+    pub fn inset(self: Rect, e: Edges) Rect {
+        return .{
+            .x = self.x + e.l,
+            .y = self.y + e.t,
+            .w = @max(0, self.w - e.l - e.r),
+            .h = @max(0, self.h - e.t - e.b),
+        };
+    }
+
+    pub fn merged(self: Rect, o: Rect) Rect {
+        if (self.isEmpty()) return o;
+        if (o.isEmpty()) return self;
+        const x0 = @min(self.x, o.x);
+        const y0 = @min(self.y, o.y);
+        const x1 = @max(self.x + self.w, o.x + o.w);
+        const y1 = @max(self.y + self.h, o.y + o.h);
+        return .{ .x = x0, .y = y0, .w = x1 - x0, .h = y1 - y0 };
+    }
+
+    pub fn toArray(self: Rect) [4]f32 {
+        return .{ self.x, self.y, self.w, self.h };
+    }
+
+    pub fn fromArray(v: [4]f32) Rect {
+        return .{ .x = v[0], .y = v[1], .w = v[2], .h = v[3] };
     }
 
     pub fn merge(self: Rect, other: Rect) Rect {

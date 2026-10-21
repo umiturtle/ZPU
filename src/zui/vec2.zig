@@ -64,6 +64,26 @@ pub const Vec2 = struct {
     pub fn approxEql(a: Vec2, b: Vec2, epsilon: f32) bool {
         return @abs(a.x - b.x) < epsilon and @abs(a.y - b.y) < epsilon;
     }
+
+    /// Axis type for index/along methods
+    pub const Axis = enum {
+        x,
+        y,
+
+        pub fn other(self: Axis) Axis {
+            return if (self == .x) .y else .x;
+        }
+    };
+
+    /// Get component by axis
+    pub fn index(self: Vec2, axis: Axis) f32 {
+        return if (axis == .x) self.x else self.y;
+    }
+
+    /// Flip axes for code that works with both row and column layouts
+    pub fn along(self: Vec2, axis: Axis) Vec2 {
+        return if (axis == .x) self else .{ .x = self.y, .y = self.x };
+    }
 };
 
 // ============================================================================

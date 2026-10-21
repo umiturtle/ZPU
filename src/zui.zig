@@ -37,6 +37,7 @@
 const std = @import("std");
 
 pub const types = @import("zui/types.zig");
+pub const config = @import("zui/config.zig");
 pub const input = @import("zui/input.zig");
 pub const font = @import("zui/font.zig");
 pub const text = @import("zui/text.zig");
@@ -82,6 +83,11 @@ pub const Context = context.Context;
 pub const EditState = context.EditState;
 
 pub const Ui = ui_mod.Ui;
+pub const UiWith = ui_mod.UiWith;
+pub const Config = config.Config;
+pub const Quality = config.Quality;
+pub const SoftwareBackend = config.SoftwareBackend;
+pub const MockBackend = config.MockBackend;
 pub const Style = ui_mod.Style;
 pub const Theme = ui_mod.Theme;
 pub const Response = ui_mod.Response;
