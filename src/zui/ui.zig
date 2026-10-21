@@ -60,6 +60,7 @@ const frame_widget = @import("widgets/frame.zig");
 const helpers_widget = @import("widgets/helpers.zig");
 const paint_widget = @import("widgets/paint.zig");
 const lifecycle_widget = @import("widgets/lifecycle.zig");
+const id_widget = @import("widgets/id.zig");
 
 const Alignment = types.Alignment;
 const Axis = types.Axis;
@@ -331,7 +332,7 @@ pub const Ui = struct {
         return helpers_widget.paintTooltip(self, tip);
     }
 
-    fn result(self: *const Ui) FrameResult {
+    pub fn result(self: *const Ui) FrameResult {
         return lifecycle_widget.result(self);
     }
 
@@ -408,25 +409,23 @@ pub const Ui = struct {
 
     // --------------------------------------------------------------------- ids
 
-    fn scopeHash(self: *const Ui) u64 {
-        return if (self.id_top == 0) 0 else self.id_stack[self.id_top - 1];
+    pub fn scopeHash(self: *const Ui) u64 {
+        return id_widget.scopeHash(self);
     }
 
     pub fn idOf(self: *const Ui, name: []const u8) Id {
-        return Id.hash(self.scopeHash(), name);
+        return id_widget.idOf(self, name);
     }
 
     /// Scopes an id by index instead of by name: row `i` of a list is a widget
     /// id like any other, and formatting a label for each of a million rows
     /// would be work for nothing.
     pub fn pushIdIndex(self: *Ui, i: usize) void {
-        self.id_stack[self.id_top] = Id.index(self.scopeHash(), i).h;
-        self.id_top += 1;
+        return id_widget.pushIdIndex(self, i);
     }
 
     pub fn pushId(self: *Ui, name: []const u8) void {
-        self.id_stack[self.id_top] = Id.hash(self.scopeHash(), name).h;
-        self.id_top += 1;
+        return id_widget.pushId(self, name);
     }
 
     pub fn popId(self: *Ui) void {
