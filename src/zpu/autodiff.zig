@@ -649,9 +649,11 @@ pub const Engine = struct {
     pub fn seed(self: *Engine, tensor: Tensor, g: Tensor) !void {
         if (self.grads.getPtr(tensor.id)) |slot| {
             const sum = try ops.add(slot.*, g);
+            // Untrack sum from current scope since we're taking ownership in the hashmap
+            tmod.untrack(sum);
             var old = slot.*;
             old.deinit();
-            slot.* = sum.retain();
+            slot.* = sum;
         } else {
             try self.grads.put(self.alloc, tensor.id, g.retain());
         }

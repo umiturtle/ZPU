@@ -83,7 +83,6 @@ pub fn whileLoop(cond_fn: Fn, body_fn: Fn, init_carry: []const Tensor) Error![]T
     
     while (guard < max_iters) : (guard += 1) {
         const pred = try cond_fn(carry);
-        defer pred.deinit();
         
         const pred_val = pred.readF64(0);
         if (pred_val == 0.0) break;
@@ -96,8 +95,7 @@ pub fn whileLoop(cond_fn: Fn, body_fn: Fn, init_carry: []const Tensor) Error![]T
             new_carry[i] = try body_fn(carry);
         }
         
-        // Free old carry
-        for (carry) |*t| t.deinit();
+        // Let Scope handle cleanup - don't manually deinit Tensors
         std.heap.c_allocator.free(carry);
         
         carry = new_carry;
@@ -105,7 +103,6 @@ pub fn whileLoop(cond_fn: Fn, body_fn: Fn, init_carry: []const Tensor) Error![]T
     
     if (guard >= max_iters) {
         // Free carry before returning error
-        for (carry) |*t| t.deinit();
         std.heap.c_allocator.free(carry);
         return Error.NotSupported;
     }
@@ -143,20 +140,16 @@ pub fn scan(f: *const fn (Tensor, Tensor) Error!ScanResult, init: Tensor, xs: Te
     for (0..seq_len) |i| {
         // Extract xs[i]
         const x_i = try ops.narrow(xs, 0, @intCast(i), 1);
-        defer x_i.deinit();
         
         const result = try f(carry, x_i);
         
-        // Store y
-        const y_data = result.y.flatSlice(f64) orelse return Error.DTypeMismatch;
-        for (y_data, 0..) |v, j| {
-            ys_data[i * y_data.len + j] = v;
+        // Store y - use readF64 instead of flatSlice for dtype compatibility
+        for (0..result.y.numel()) |j| {
+            ys_data[i * (xs.numel() / seq_len) + j] = result.y.readF64(j);
         }
         
-        // Update carry
-        if (i > 0) carry.deinit();
+        // Update carry - let Scope handle cleanup
         carry = result.carry;
-        result.y.deinit();
     }
     
     // Create ys tensor
@@ -193,9 +186,8 @@ pub fn foriLoop(lower: i32, upper: i32, body_fn: *const fn (Tensor, Tensor) Erro
     for (@as(usize, @intCast(lower))..@as(usize, @intCast(upper))) |i| {
         const i_tensor = try Tensor.fromScalarF64(@floatFromInt(i), carry.dtype());
         const new_carry = try body_fn(i_tensor, carry);
-        defer i_tensor.deinit();
         
-        if (i > lower) carry.deinit();
+        // Let Scope handle cleanup - don't manually deinit
         carry = new_carry;
     }
     
@@ -221,12 +213,12 @@ test "foriLoop basic" {
     
     // Sum 0..5
     const init = try Tensor.fromScalarF64(0.0, .f32);
+    // Don't deinit init - Scope will handle it
     const result = try foriLoop(0, 5, struct {
         fn body(i: Tensor, carry: Tensor) Error!Tensor {
             return ops.add(carry, i);
         }
     }.body, init);
-    defer result.deinit();
     
     // 0+1+2+3+4 = 10
     try std.testing.expectApproxEqAbs(@as(f64, 10.0), result.item(), 1e-6);
@@ -238,44 +230,35 @@ test "cond basic" {
     defer scope.deinit();
     
     const pred_true = try Tensor.fromScalarF64(1.0, .f32);
-    defer pred_true.deinit();
     const pred_false = try Tensor.fromScalarF64(0.0, .f32);
-    defer pred_false.deinit();
     
     const x = try Tensor.fromScalarF64(5.0, .f32);
-    defer x.deinit();
     
     const result_true = try cond(pred_true, struct {
         fn f(args: []const Tensor) Error!Tensor {
             const two = try ops.scalarLike(args[0], 2.0);
-            defer releaseTemp(two);
             return ops.mul(args[0], two);
         }
     }.f, struct {
         fn f(args: []const Tensor) Error!Tensor {
             const three = try ops.scalarLike(args[0], 3.0);
-            defer releaseTemp(three);
             return ops.mul(args[0], three);
         }
     }.f, &.{x});
-    defer result_true.deinit();
     
     try std.testing.expectApproxEqAbs(@as(f64, 10.0), result_true.item(), 1e-6);
     
     const result_false = try cond(pred_false, struct {
         fn f(args: []const Tensor) Error!Tensor {
             const two = try ops.scalarLike(args[0], 2.0);
-            defer releaseTemp(two);
             return ops.mul(args[0], two);
         }
     }.f, struct {
         fn f(args: []const Tensor) Error!Tensor {
             const three = try ops.scalarLike(args[0], 3.0);
-            defer releaseTemp(three);
             return ops.mul(args[0], three);
         }
     }.f, &.{x});
-    defer result_false.deinit();
     
     try std.testing.expectApproxEqAbs(@as(f64, 15.0), result_false.item(), 1e-6);
 }
@@ -287,7 +270,6 @@ test "scan basic" {
     
     // Cumulative sum using scan
     const xs = try Tensor.fromArray(f32, &.{ 1.0, 2.0, 3.0, 4.0 }, try Shape.init(&.{4}));
-    defer xs.deinit();
     
     const init = try Tensor.fromScalarF64(0.0, .f32);
     
@@ -297,8 +279,6 @@ test "scan basic" {
             return .{ .carry = new_carry, .y = new_carry };
         }
     }.f, init, xs);
-    defer result.final_carry.deinit();
-    defer result.ys.deinit();
     
     // Check cumulative sums: [1, 3, 6, 10]
     try std.testing.expectApproxEqAbs(@as(f64, 1.0), result.ys.readF64(0), 1e-6);
@@ -321,23 +301,18 @@ test "whileLoop basic" {
     const result = try whileLoop(struct {
         fn cond(args: []const Tensor) Error!Tensor {
             const zero = try ops.scalarLike(args[0], 0.0);
-            defer releaseTemp(zero);
             return ops.gt(args[0], zero);
         }
         fn body(args: []const Tensor) Error!Tensor {
             const one = try ops.scalarLike(args[0], 1.0);
-            defer releaseTemp(one);
             return ops.sub(args[0], one);
         }
     }.cond, struct {
         fn body(args: []const Tensor) Error!Tensor {
             const one = try ops.scalarLike(args[0], 1.0);
-            defer releaseTemp(one);
             return ops.sub(args[0], one);
         }
     }.body, &.{init});
-    defer result[0].deinit();
-    defer alloc.free(result);
     
     try std.testing.expectApproxEqAbs(@as(f64, 0.0), result[0].item(), 1e-6);
 }
@@ -348,27 +323,23 @@ test "switch basic" {
     defer scope.deinit();
     
     const x = try Tensor.fromScalarF64(10.0, .f32);
-    defer x.deinit();
     
     const branches = [_]Fn{
         struct {
             fn f(args: []const Tensor) Error!Tensor {
                 const c = try ops.scalarLike(args[0], 2.0);
-                defer releaseTemp(c);
                 return ops.mul(args[0], c);
             }
         }.f,
         struct {
             fn f(args: []const Tensor) Error!Tensor {
                 const c = try ops.scalarLike(args[0], 3.0);
-                defer releaseTemp(c);
                 return ops.mul(args[0], c);
             }
         }.f,
         struct {
             fn f(args: []const Tensor) Error!Tensor {
                 const c = try ops.scalarLike(args[0], 4.0);
-                defer releaseTemp(c);
                 return ops.mul(args[0], c);
             }
         }.f,
@@ -376,22 +347,16 @@ test "switch basic" {
     
     // Test index 0: 10 * 2 = 20
     const idx0 = try Tensor.fromScalarF64(0.0, .i32);
-    defer idx0.deinit();
     const result0 = try switchCase(idx0, &branches, &.{x});
-    defer result0.deinit();
     try std.testing.expectApproxEqAbs(@as(f64, 20.0), result0.item(), 1e-6);
     
     // Test index 1: 10 * 3 = 30
     const idx1 = try Tensor.fromScalarF64(1.0, .i32);
-    defer idx1.deinit();
     const result1 = try switchCase(idx1, &branches, &.{x});
-    defer result1.deinit();
     try std.testing.expectApproxEqAbs(@as(f64, 30.0), result1.item(), 1e-6);
     
     // Test index 2: 10 * 4 = 40
     const idx2 = try Tensor.fromScalarF64(2.0, .i32);
-    defer idx2.deinit();
     const result2 = try switchCase(idx2, &branches, &.{x});
-    defer result2.deinit();
     try std.testing.expectApproxEqAbs(@as(f64, 40.0), result2.item(), 1e-6);
 }

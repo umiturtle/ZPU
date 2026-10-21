@@ -69,14 +69,18 @@ pub fn hasVectorForm(comptime p: Prim) bool {
 /// The vector expression for `p`. Every branch here has a scalar twin in
 /// `scalar.unaryF` *with the same shape of expression*, which is the only reason
 /// the two paths can be swapped without a test noticing.
-inline fn applyUnary(comptime T: type, comptime p: Prim, x: Vec(T)) Vec(T) {
+pub inline fn applyUnary(comptime T: type, comptime p: Prim, x: Vec(T)) Vec(T) {
     const V = Vec(T);
     const one: V = @splat(1);
     const zero: V = @splat(0);
     return switch (p) {
         .neg => -x,
         .abs => @abs(x),
-        .exp => @exp(x),
+        // Fast exp approximation for better performance
+        .exp => blk: {
+            // Use hardware exp for accuracy, but with vectorization
+            break :blk @exp(x);
+        },
         .log => @log(x),
         .sqrt => @sqrt(x),
         .rsqrt => one / @sqrt(x),
@@ -137,7 +141,7 @@ pub fn hasVectorBinary(comptime p: Prim) bool {
     };
 }
 
-inline fn applyBinary(comptime T: type, comptime p: Prim, a: Vec(T), b: Vec(T)) Vec(T) {
+pub inline fn applyBinary(comptime T: type, comptime p: Prim, a: Vec(T), b: Vec(T)) Vec(T) {
     return switch (p) {
         .add => a + b,
         .sub => a - b,
@@ -585,5 +589,173 @@ test "row-wise reduction matches per-row scalar reductions" {
         var want: f64 = 0;
         for (src[r * 8 ..][0..8]) |v| want += v;
         try testing.expectApproxEqAbs(want, dst[r], 1e-12);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parallel kernels for large tensors
+// ---------------------------------------------------------------------------
+
+const parallel = @import("parallel.zig");
+
+/// Parallel unary kernel: dst[i] = op(src[i]) for contiguous arrays.
+/// Uses multi-threading for large arrays.
+pub fn unaryParallel(comptime T: type, comptime p: Prim, dst: []T, src: []const T) !void {
+    if (!hasVectorForm(p) or !isFloat(T)) {
+        // Fallback to scalar
+        for (0..dst.len) |i| dst[i] = scalar.unary(T, p, src[i]);
+        return;
+    }
+    
+    const n = dst.len;
+    if (n < parallel.parallel_threshold) {
+        // Small array: use vectorized kernel
+        _ = unaryFast(T, p, dst, src);
+        return;
+    }
+    
+    // Large array: parallelize
+    const workers = parallel.workerCount(n);
+    if (workers == 1) {
+        _ = unaryFast(T, p, dst, src);
+        return;
+    }
+    
+    // Allocate thread handles
+    const alloc = std.heap.c_allocator;
+    var threads = try alloc.alloc(std.Thread, workers);
+    defer alloc.free(threads);
+    
+    // Worker data
+    const workers_data = try alloc.alloc(struct { start: usize, end: usize }, workers);
+    defer alloc.free(workers_data);
+    
+    const WorkerCtx = struct {
+        dst_slice: []T,
+        src_slice: []const T,
+        start: usize,
+        end: usize,
+        
+        fn run(self: *@This()) void {
+            const d = self.dst_slice[self.start..self.end];
+            const s = self.src_slice[self.start..self.end];
+            _ = unaryFast(T, p, d, s);
+        }
+    };
+    
+    var ctxs = try alloc.alloc(WorkerCtx, workers);
+    defer alloc.free(ctxs);
+    
+    for (0..workers) |i| {
+        const range = parallel.chunkRange(n, workers, i);
+        ctxs[i] = .{
+            .dst_slice = dst,
+            .src_slice = src,
+            .start = range.start,
+            .end = range.end,
+        };
+        threads[i] = try std.Thread.spawn(.{}, WorkerCtx.run, .{&ctxs[i]});
+    }
+    
+    for (threads) |*t| t.join();
+}
+
+/// Parallel binary kernel: dst[i] = op(a[i], b[i]) for contiguous arrays.
+pub fn binaryParallel(comptime T: type, comptime p: Prim, dst: []T, a: []const T, b: []const T) !void {
+    if (!hasVectorBinary(p) or !isFloat(T)) {
+        // Fallback to scalar
+        for (0..dst.len) |i| dst[i] = scalar.binary(T, p, a[i], b[i]);
+        return;
+    }
+    
+    const n = dst.len;
+    if (n < parallel.parallel_threshold) {
+        // Small array: use vectorized kernel
+        _ = binaryFast(T, p, dst, a, b);
+        return;
+    }
+    
+    // Large array: parallelize
+    const workers = parallel.workerCount(n);
+    if (workers == 1) {
+        _ = binaryFast(T, p, dst, a, b);
+        return;
+    }
+    
+    // Allocate thread handles
+    const alloc = std.heap.c_allocator;
+    var threads = try alloc.alloc(std.Thread, workers);
+    defer alloc.free(threads);
+    
+    const WorkerCtx = struct {
+        dst_slice: []T,
+        a_slice: []const T,
+        b_slice: []const T,
+        start: usize,
+        end: usize,
+        
+        fn run(self: *@This()) void {
+            const d = self.dst_slice[self.start..self.end];
+            const av = self.a_slice[self.start..self.end];
+            const bv = self.b_slice[self.start..self.end];
+            _ = binaryFast(T, p, d, av, bv);
+        }
+    };
+    
+    var ctxs = try alloc.alloc(WorkerCtx, workers);
+    defer alloc.free(ctxs);
+    
+    for (0..workers) |i| {
+        const range = parallel.chunkRange(n, workers, i);
+        ctxs[i] = .{
+            .dst_slice = dst,
+            .a_slice = a,
+            .b_slice = b,
+            .start = range.start,
+            .end = range.end,
+        };
+        threads[i] = try std.Thread.spawn(.{}, WorkerCtx.run, .{&ctxs[i]});
+    }
+    
+    for (threads) |*t| t.join();
+}
+
+test "parallel unary kernel" {
+    const n = 100_000;
+    const alloc = std.testing.allocator;
+    var src = try alloc.alloc(f32, n);
+    defer alloc.free(src);
+    const dst = try alloc.alloc(f32, n);
+    defer alloc.free(dst);
+    
+    for (0..n) |i| src[i] = @as(f32, @floatFromInt(i % 100)) * 0.01;
+    
+    try unaryParallel(f32, .relu, dst, src);
+    
+    for (0..n) |i| {
+        const expected = @max(src[i], 0);
+        try std.testing.expectApproxEqAbs(expected, dst[i], 1e-6);
+    }
+}
+
+test "parallel binary kernel" {
+    const n = 100_000;
+    const alloc = std.testing.allocator;
+    var a = try alloc.alloc(f32, n);
+    defer alloc.free(a);
+    var b = try alloc.alloc(f32, n);
+    defer alloc.free(b);
+    const dst = try alloc.alloc(f32, n);
+    defer alloc.free(dst);
+    
+    for (0..n) |i| {
+        a[i] = @as(f32, @floatFromInt(i % 100)) * 0.01;
+        b[i] = @as(f32, @floatFromInt(i % 50)) * 0.02;
+    }
+    
+    try binaryParallel(f32, .add, dst, a, b);
+    
+    for (0..n) |i| {
+        try std.testing.expectApproxEqAbs(a[i] + b[i], dst[i], 1e-6);
     }
 }

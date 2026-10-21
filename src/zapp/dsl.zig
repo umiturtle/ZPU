@@ -23,6 +23,7 @@
 
 const std = @import("std");
 const zgf = @import("zgf");
+const widgets = @import("widgets.zig");
 
 /// UIノードの種類
 pub const NodeKind = enum {
@@ -260,249 +261,45 @@ pub fn render(fb: *zgf.Image, root: Node) void {
 fn renderNode(fb: *zgf.Image, node: Node, rect: Rect) void {
     switch (node) {
         .vstack, .hstack => {}, // 子は既にレイアウト済み
-        .label => |l| renderLabel(fb, l.text, rect, l.style),
-        .button => |b| renderButton(fb, b.text, rect, b.style),
-        .slider => |s| renderSlider(fb, s.label_text, s.value, s.min_val, s.max_val, rect, s.style),
-        .checkbox => |c| renderCheckbox(fb, c.label_text, c.checked, rect, c.style),
-        .progress_bar => |p| renderProgressBar(fb, p.value, rect, p.style),
-        .text_input => |t| renderTextInput(fb, t.text, t.placeholder, rect, t.style),
+        .label => |l| widgets.label.render(fb, .{
+            .text = l.text,
+            .rect = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h },
+            .color = l.style.fg,
+        }),
+        .button => |b| widgets.button.render(fb, .{
+            .text = b.text,
+            .rect = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h },
+            .bg = b.style.bg,
+            .fg = b.style.fg,
+            .border = b.style.border,
+            .radius = b.style.radius,
+        }),
+        .slider => |s| widgets.slider.render(fb, .{
+            .value = s.value,
+            .min = s.min_val,
+            .max = s.max_val,
+            .rect = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h },
+            .fill = s.style.accent,
+        }),
+        .checkbox => |c| widgets.checkbox.render(fb, .{
+            .checked = c.checked,
+            .rect = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h },
+            .check = c.style.accent,
+        }),
+        .progress_bar => |p| widgets.progress_bar.render(fb, .{
+            .value = p.value,
+            .rect = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h },
+            .fill = p.style.accent,
+        }),
+        .text_input => |t| widgets.text_input.render(fb, .{
+            .text = t.text,
+            .placeholder = t.placeholder,
+            .rect = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h },
+        }),
         .spacer => {},
-        .separator => |s| renderSeparator(fb, rect, s.style),
-    }
-}
-
-// --- 個別ウィジェット描画 ---
-
-fn fillRect(fb: *zgf.Image, rect: Rect, color: zgf.Color) void {
-    const fw = fb.width();
-    const fh = fb.height();
-    // 座標を整数に変換（クランプ）
-    const x0: usize = @intFromFloat(@max(rect.x, 0));
-    const y0: usize = @intFromFloat(@max(rect.y, 0));
-    const x1: usize = @intFromFloat(@min(rect.x + rect.w, @as(f32, @floatFromInt(fw))));
-    const y1: usize = @intFromFloat(@min(rect.y + rect.h, @as(f32, @floatFromInt(fh))));
-    if (x0 >= x1 or y0 >= y1) return;
-    // ピクセルを描画
-    for (y0..y1) |y| {
-        for (x0..x1) |x| {
-            fb.setPixel(@intCast(x), @intCast(y), color);
-        }
-    }
-}
-
-fn drawRectBorder(fb: *zgf.Image, rect: Rect, color: zgf.Color) void {
-    const fw = fb.width();
-    const fh = fb.height();
-    const x0: usize = @intFromFloat(@max(rect.x, 0));
-    const y0: usize = @intFromFloat(@max(rect.y, 0));
-    const x1: usize = @intFromFloat(@min(rect.x + rect.w - 1, @as(f32, @floatFromInt(fw - 1))));
-    const y1: usize = @intFromFloat(@min(rect.y + rect.h - 1, @as(f32, @floatFromInt(fh - 1))));
-    if (x0 > x1 or y0 > y1) return;
-    // 上下の水平線
-    for (x0..x1) |x| {
-        fb.setPixel(@intCast(x), @intCast(y0), color);
-        fb.setPixel(@intCast(x), @intCast(y1), color);
-    }
-    // 左右の垂直線
-    for (y0..y1) |y| {
-        fb.setPixel(@intCast(x0), @intCast(y), color);
-        fb.setPixel(@intCast(x1), @intCast(y), color);
-    }
-}
-
-/// 簡易テキストレンダラー（5x7ドット風）
-fn drawText(fb: *zgf.Image, text: []const u8, x: f32, y: f32, color: zgf.Color) void {
-    var cx: usize = @intFromFloat(@max(x, 0));
-    const cy: usize = @intFromFloat(@max(y, 0));
-    const fw = fb.width();
-    const fh = fb.height();
-    const char_w: usize = 6;
-    const char_h: usize = 7;
-    for (text) |ch| {
-        if (ch == ' ') {
-            cx += char_w + 1;
-            continue;
-        }
-        // 画面右端を超えたら描画を停止
-        if (cx >= fw) break;
-        // 文字パターンを取得
-        const pattern = charPattern(ch);
-        // 7行 x 5列の文字を描画
-        for (0..char_h) |py| {
-            for (0..5) |px| {
-                if (pattern[py] & (@as(u8, 1) << @intCast(4 - px)) != 0) {
-                    const draw_x = cx + px;
-                    const draw_y = cy + py;
-                    if (draw_x < fw and draw_y < fh) {
-                        fb.setPixel(@intCast(draw_x), @intCast(draw_y), color);
-                    }
-                }
-            }
-        }
-        cx += char_w + 1;
-    }
-}
-
-fn charPattern(ch: u8) [7]u8 {
-    return switch (ch) {
-        'A' => .{ 0x04, 0x0A, 0x11, 0x1F, 0x11, 0x11, 0x11 },
-        'B' => .{ 0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E },
-        'C' => .{ 0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E },
-        'D' => .{ 0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E },
-        'E' => .{ 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F },
-        'F' => .{ 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10 },
-        'G' => .{ 0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0E },
-        'H' => .{ 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 },
-        'I' => .{ 0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E },
-        'J' => .{ 0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C },
-        'K' => .{ 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 },
-        'L' => .{ 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F },
-        'M' => .{ 0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11 },
-        'N' => .{ 0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11 },
-        'O' => .{ 0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E },
-        'P' => .{ 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 },
-        'Q' => .{ 0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D },
-        'R' => .{ 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 },
-        'S' => .{ 0x0E, 0x11, 0x10, 0x0E, 0x01, 0x11, 0x0E },
-        'T' => .{ 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 },
-        'U' => .{ 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E },
-        'V' => .{ 0x11, 0x11, 0x11, 0x11, 0x0A, 0x0A, 0x04 },
-        'W' => .{ 0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11 },
-        'X' => .{ 0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11 },
-        'Y' => .{ 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04 },
-        'Z' => .{ 0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F },
-        '0' => .{ 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E },
-        '1' => .{ 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E },
-        '2' => .{ 0x0E, 0x11, 0x01, 0x06, 0x08, 0x10, 0x1F },
-        '3' => .{ 0x0E, 0x11, 0x01, 0x06, 0x01, 0x11, 0x0E },
-        '4' => .{ 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 },
-        '5' => .{ 0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E },
-        '6' => .{ 0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E },
-        '7' => .{ 0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 },
-        '8' => .{ 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E },
-        '9' => .{ 0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C },
-        ':' => .{ 0x00, 0x04, 0x04, 0x00, 0x04, 0x04, 0x00 },
-        '.' => .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x06 },
-        ',' => .{ 0x00, 0x00, 0x00, 0x00, 0x04, 0x04, 0x08 },
-        '-' => .{ 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00 },
-        '+' => .{ 0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00 },
-        '=' => .{ 0x00, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00 },
-        '%' => .{ 0x19, 0x19, 0x02, 0x04, 0x08, 0x13, 0x13 },
-        '/' => .{ 0x01, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10 },
-        '(' => .{ 0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02 },
-        ')' => .{ 0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08 },
-        '[' => .{ 0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E },
-        ']' => .{ 0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E },
-        '!' => .{ 0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04 },
-        '?' => .{ 0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04 },
-        '_' => .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F },
-        '"' => .{ 0x0A, 0x0A, 0x0A, 0x00, 0x00, 0x00, 0x00 },
-        '\'' => .{ 0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00 },
-        '*' => .{ 0x00, 0x04, 0x15, 0x0E, 0x15, 0x04, 0x00 },
-        '#' => .{ 0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A },
-        '@' => .{ 0x0E, 0x11, 0x17, 0x15, 0x17, 0x10, 0x0F },
-        '&' => .{ 0x08, 0x14, 0x14, 0x08, 0x15, 0x12, 0x0D },
-        '^' => .{ 0x04, 0x0A, 0x11, 0x00, 0x00, 0x00, 0x00 },
-        '~' => .{ 0x00, 0x00, 0x08, 0x15, 0x02, 0x00, 0x00 },
-        '<' => .{ 0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02 },
-        '>' => .{ 0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08 },
-        else => .{ 0x1F, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1F }, // □ (unknown)
-    };
-}
-
-fn renderLabel(fb: *zgf.Image, text: []const u8, rect: Rect, style: WidgetOpts) void {
-    const x: f32 = rect.x + style.font_h * 0.3;
-    const y: f32 = rect.y + (rect.h - style.font_h) / 2;
-    drawText(fb, text, @max(x, 0), @max(y, 0), style.fg);
-}
-
-fn renderButton(fb: *zgf.Image, text: []const u8, rect: Rect, style: WidgetOpts) void {
-    fillRect(fb, rect, style.bg);
-    drawRectBorder(fb, rect, style.border);
-    // テキスト中央配置
-    const text_w: f32 = @floatFromInt(text.len * 7);
-    const text_x: f32 = rect.x + (rect.w - text_w) / 2;
-    const text_y: f32 = rect.y + (rect.h - 8) / 2;
-    drawText(fb, text, @max(text_x, 0), @max(text_y, 0), style.fg);
-}
-
-fn renderSlider(fb: *zgf.Image, label_text: []const u8, value: f32, min_val: f32, max_val: f32, rect: Rect, style: WidgetOpts) void {
-    const label_w: f32 = @floatFromInt(label_text.len * 7 + 8);
-    // ラベル
-    drawText(fb, label_text, @max(rect.x, 0), @max(rect.y + (rect.h - 8) / 2, 0), style.fg);
-    // トラック
-    const track_x: f32 = rect.x + label_w;
-    const track_y: f32 = rect.y + rect.h / 2 - 3;
-    const track_w: f32 = rect.w - label_w;
-    const track_rect = Rect{ .x = track_x, .y = track_y, .w = track_w, .h = 6 };
-    fillRect(fb, track_rect, style.bg);
-    // フィル
-    const norm = (value - min_val) / (max_val - min_val);
-    const fill_w = track_rect.w * norm;
-    fillRect(fb, Rect{ .x = track_rect.x, .y = track_rect.y, .w = fill_w, .h = track_rect.h }, style.accent);
-    // ハンドル
-    const hx: f32 = track_rect.x + fill_w - 4;
-    fillRect(fb, Rect{ .x = hx, .y = rect.y + 2, .w = 8, .h = rect.h - 4 }, style.fg);
-}
-
-fn renderCheckbox(fb: *zgf.Image, label_text: []const u8, checked: bool, rect: Rect, style: WidgetOpts) void {
-    const box_size: f32 = 16;
-    const box_rect = Rect{ .x = rect.x, .y = rect.y + (rect.h - box_size) / 2, .w = box_size, .h = box_size };
-    fillRect(fb, box_rect, style.bg);
-    drawRectBorder(fb, box_rect, style.border);
-    if (checked) {
-        // チェックマーク（簡易版：斜線）
-        const bx: usize = @intFromFloat(@max(box_rect.x, 0));
-        const by: usize = @intFromFloat(@max(box_rect.y, 0));
-        const bs: usize = 16;
-        const fw = fb.width();
-        const fh = fb.height();
-        for (0..bs) |i| {
-            const px = bx + i;
-            const py = by + i;
-            if (px < fw and py < fh) {
-                fb.setPixel(@intCast(px), @intCast(py), style.accent);
-            }
-        }
-        for (0..bs) |i| {
-            const px = bx + i;
-            const py = by + (bs - 1 - i);
-            if (px < fw and py < fh) {
-                fb.setPixel(@intCast(px), @intCast(py), style.accent);
-            }
-        }
-    }
-    const label_x: f32 = rect.x + box_size + 6;
-    const label_y: f32 = rect.y + (rect.h - 8) / 2;
-    drawText(fb, label_text, label_x, label_y, style.fg);
-}
-
-fn renderProgressBar(fb: *zgf.Image, value: f32, rect: Rect, style: WidgetOpts) void {
-    fillRect(fb, rect, style.bg);
-    drawRectBorder(fb, rect, style.border);
-    const fill_w = (rect.w - 2) * value;
-    fillRect(fb, Rect{ .x = rect.x + 1, .y = rect.y + 1, .w = fill_w, .h = rect.h - 2 }, style.accent);
-}
-
-fn renderTextInput(fb: *zgf.Image, text: []const u8, placeholder: []const u8, rect: Rect, style: WidgetOpts) void {
-    fillRect(fb, rect, style.bg);
-    drawRectBorder(fb, rect, style.border);
-    if (text.len > 0) {
-        drawText(fb, text, @max(rect.x + 4, 0), @max(rect.y + (rect.h - 8) / 2, 0), style.fg);
-    } else if (placeholder.len > 0) {
-        drawText(fb, placeholder, @max(rect.x + 4, 0), @max(rect.y + (rect.h - 8) / 2, 0), .{ .r = 0.5, .g = 0.5, .b = 0.5, .a = 1 });
-    }
-}
-
-fn renderSeparator(fb: *zgf.Image, rect: Rect, style: WidgetOpts) void {
-    const fw = fb.width();
-    const fh = fb.height();
-    const mid_y: usize = @intFromFloat(@max(@min(rect.y + rect.h / 2, @as(f32, @floatFromInt(fh - 1))), 0));
-    const sx: usize = @intFromFloat(@max(rect.x, 0));
-    const ex: usize = @intFromFloat(@min(rect.x + rect.w, @as(f32, @floatFromInt(fw))));
-    if (sx >= ex) return;
-    for (sx..ex) |x| {
-        fb.setPixel(@intCast(x), @intCast(mid_y), style.border);
+        .separator => widgets.separator.render(fb, .{
+            .rect = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h },
+        }),
     }
 }
 

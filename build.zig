@@ -46,24 +46,28 @@ const Library = struct {
 };
 
 fn createLibrary(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, public: bool) Library {
+    return createLibraryWithLibc(b, target, optimize, public, true);
+}
+
+fn createLibraryWithLibc(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, public: bool, link_libc: bool) Library {
     const add = struct {
-        fn one(bb: *std.Build, name: []const u8, path: []const u8, t: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, is_public: bool) *std.Build.Module {
+        fn one(bb: *std.Build, name: []const u8, path: []const u8, t: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, is_public: bool, libc: bool) *std.Build.Module {
             return if (is_public)
-                bb.addModule(name, .{ .root_source_file = bb.path(path), .target = t, .optimize = opt, .link_libc = true })
+                bb.addModule(name, .{ .root_source_file = bb.path(path), .target = t, .optimize = opt, .link_libc = libc })
             else
-                bb.createModule(.{ .root_source_file = bb.path(path), .target = t, .optimize = opt, .link_libc = true });
+                bb.createModule(.{ .root_source_file = bb.path(path), .target = t, .optimize = opt, .link_libc = libc });
         }
     }.one;
 
-    const backend = add(b, "zbackend", "src/backend.zig", target, optimize, public);
-    const zpu = add(b, "zpu", "src/zpu.zig", target, optimize, public);
-    const zgf = add(b, "zgf", "src/zgf.zig", target, optimize, public);
+    const backend = add(b, "zbackend", "src/backend.zig", target, optimize, public, link_libc);
+    const zpu = add(b, "zpu", "src/zpu.zig", target, optimize, public, link_libc);
+    const zgf = add(b, "zgf", "src/zgf.zig", target, optimize, public, link_libc);
     zgf.addImport("zpu", zpu);
-    const zui = add(b, "zui", "src/zui.zig", target, optimize, public);
+    const zui = add(b, "zui", "src/zui.zig", target, optimize, public, link_libc);
     zui.addImport("zpu", zpu);
     zui.addImport("zgf", zgf);
     zui.addImport("zbackend", backend);
-    const zapp = add(b, "zapp", "src/zapp.zig", target, optimize, public);
+    const zapp = add(b, "zapp", "src/zapp.zig", target, optimize, public, link_libc);
     zapp.addImport("zpu", zpu);
     zapp.addImport("zgf", zgf);
     zapp.addImport("zui", zui);
@@ -73,6 +77,10 @@ fn createLibrary(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    
+    // レンダリング品質オプション
+    const RenderQualityOption = enum { low, medium, high, ultra };
+    const render_quality = b.option(RenderQualityOption, "render-quality", "UI rendering quality level (default: medium)") orelse .medium;
 
     // ------------------------------------------------------------------ modules
     // `zpu`: the JAX-flavoured numerical core. `zgf`: the graphics library.
@@ -92,7 +100,16 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the ZPU/ZGF test suite");
     const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this string");
 
+    // レンダリング品質をビルドオプションとして追加
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "render_quality", @tagName(render_quality));
+
     const zapp_mod = lib.zapp;
+    zapp_mod.addOptions("build_options", build_options);
+    
+    // テストモジュールにもbuild_optionsを追加
+    const test_build_options = b.addOptions();
+    test_build_options.addOption([]const u8, "render_quality", @tagName(render_quality));
 
     const imports = [_]std.Build.Module.Import{
         .{ .name = "zpu", .module = zpu_mod },
@@ -108,6 +125,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &imports,
     });
+    test_mod.addOptions("build_options", test_build_options);
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
         .filters = if (test_filter) |f| &.{f} else &.{},
@@ -213,6 +231,13 @@ pub fn build(b: *std.Build) void {
         .{ .name = "resize-test", .file = "examples/resize_test.zig", .desc = "ZAPP: Window resize test (100x100 to 4K)" },
         .{ .name = "dsl-demo", .file = "examples/dsl_demo.zig", .desc = "ZAPP: Declarative UI DSL demo" },
         .{ .name = "zgf-render-test", .file = "examples/zgf_render_test.zig", .desc = "ZGF: Rendering test" },
+        .{ .name = "snapshot-test", .file = "examples/snapshot_test.zig", .desc = "ZAPP: Snapshot test for visual regression" },
+        .{ .name = "perf-benchmark", .file = "examples/performance_benchmark.zig", .desc = "ZAPP: Performance benchmark (120FPS target)" },
+        .{ .name = "vector-demo", .file = "examples/vector_demo.zig", .desc = "ZAPP: Vector rendering demo" },
+        .{ .name = "ui-v2-demo", .file = "examples/ui_v2_demo.zig", .desc = "ZAPP: Declarative UI v2 demo" },
+        .{ .name = "rich-ui-demo", .file = "examples/rich_ui_demo.zig", .desc = "ZAPP: Rich rendering demo with quality levels" },
+        .{ .name = "modern-ui-demo", .file = "examples/modern_ui_demo.zig", .desc = "ZAPP: Material Design quality modern UI components" },
+        .{ .name = "vector-benchmark", .file = "examples/vector_benchmark.zig", .desc = "ZAPP: Vector rendering performance benchmark" },
     };
 
     const examples_step = b.step("examples", "Build every example");
@@ -267,6 +292,39 @@ pub fn build(b: *std.Build) void {
         const server = b.addExecutable(.{ .name = "serve-demo", .root_module = server_mod });
         const run_server = b.addRunArtifact(server);
         b.step("serve", "Start the live rendering demo web server").dependOn(&run_server.step);
+    }
+
+    // -------------------------------------------------------------------- wasm
+    if (exists(b, "examples/web/wasm_ui.zig")) {
+        const wasm_target = b.resolveTargetQuery(.{
+            .cpu_arch = .wasm32,
+            .os_tag = .freestanding,
+        });
+        const wasm_lib = createLibraryWithLibc(b, wasm_target, .ReleaseSmall, false, false);
+        
+        const wasm_mod = b.createModule(.{
+            .root_source_file = b.path("examples/web/wasm_ui.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+            .link_libc = false,
+            .imports = &.{
+                .{ .name = "zpu", .module = wasm_lib.zpu },
+                .{ .name = "zgf", .module = wasm_lib.zgf },
+                .{ .name = "zapp", .module = wasm_lib.zapp },
+            },
+        });
+        const wasm_exe = b.addExecutable(.{
+            .name = "ui",
+            .root_module = wasm_mod,
+        });
+        wasm_exe.rdynamic = true;
+        wasm_exe.entry = .disabled;
+        wasm_exe.export_memory = true;
+        
+        const install_wasm = b.addInstallArtifact(wasm_exe, .{
+            .dest_dir = .{ .override = .{ .custom = "web" } },
+        });
+        b.step("wasm", "Build WebAssembly module for web demo").dependOn(&install_wasm.step);
     }
 
     // -------------------------------------------------------------------- checks

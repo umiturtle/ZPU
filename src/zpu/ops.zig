@@ -9,6 +9,11 @@
 //!
 //! Because recording is centralised here, the whole public surface is
 //! automatically differentiable, vmappable and jit-able.
+//!
+//! Performance optimizations:
+//! - SIMD vectorization via kernels.zig (32-byte vectors)
+//! - Multi-threaded parallel execution for large tensors via parallel.zig
+//! - Tiled GEMM with cache-friendly access patterns
 const std = @import("std");
 const dtype_mod = @import("dtype.zig");
 const shape_mod = @import("shape.zig");
@@ -19,6 +24,7 @@ const scalar = @import("scalar.zig");
 const kernels = @import("kernels.zig");
 const tape_mod = @import("tape.zig");
 const graph_mod = @import("graph.zig");
+const parallel = @import("parallel.zig");
 
 pub const DType = dtype_mod.DType;
 pub const Shape = shape_mod.Shape;
@@ -153,6 +159,15 @@ fn unaryKernel(comptime T: type, comptime p: Prim, a: Tensor, out: Tensor) void 
     if (a.isContiguous() and a.shape.eql(out.shape)) {
         const src = a.buf.data(T);
         const in = src[a.offset..][0..d.len];
+        // For large arrays, use parallel kernel; otherwise use vectorized kernel
+        if (d.len >= parallel.parallel_threshold) {
+            kernels.unaryParallel(T, p, d, in) catch {
+                // Fallback to vectorized on error
+                if (kernels.unaryFast(T, p, d, in)) return;
+                for (0..d.len) |j| d[j] = scalar.unary(T, p, in[j]);
+            };
+            return;
+        }
         // The vector kernel when this primitive has an exact one (see
         // `kernels.hasVectorForm`), the scalar loop otherwise. Nothing here
         // decides *what* to compute — only how many lanes at a time.
@@ -195,6 +210,14 @@ fn binaryKernel(comptime T: type, comptime p: Prim, a: Tensor, b: Tensor, out: T
     // shape, and an array with a broadcast scalar. Both go to the vector
     // kernels; everything else keeps the general (stride-walking) loop below.
     if (fast_a and fast_b) {
+        // For large arrays, use parallel kernel
+        if (d.len >= parallel.parallel_threshold) {
+            kernels.binaryParallel(T, p, d, da[a.offset..][0..d.len], db[b.offset..][0..d.len]) catch {
+                // Fallback to vectorized on error
+                if (kernels.binaryFast(T, p, d, da[a.offset..][0..d.len], db[b.offset..][0..d.len])) return;
+            };
+            return;
+        }
         if (kernels.binaryFast(T, p, d, da[a.offset..][0..d.len], db[b.offset..][0..d.len])) return;
     } else if (fast_a and b.numel() == 1) {
         const s = scalar.toF64(db[b.offset]);

@@ -86,6 +86,48 @@ pub const event = @import("zapp/event.zig");
 pub const app = @import("zapp/app.zig");
 pub const dsl = @import("zapp/dsl.zig");
 pub const coordinates = @import("zapp/coordinates.zig");
+pub const widgets = @import("zapp/widgets.zig");
+pub const vector = @import("zapp/vector.zig");
+pub const parallel = @import("zapp/parallel.zig");
+pub const input = @import("zapp/input.zig");
+pub const i18n = @import("zapp/i18n.zig");
+
+// Phase 4: 開発者体験
+pub const hot_reload = @import("zapp/hot_reload.zig");
+pub const dev_tools = @import("zapp/dev_tools.zig");
+
+// Phase 5: アーキテクチャ
+pub const layout = @import("zapp/layout.zig");
+pub const state = @import("zapp/state.zig");
+pub const ecs = @import("zapp/ecs.zig");
+
+// ベクターテキストレンダリング
+pub const vector_text = @import("zapp/vector_text.zig");
+
+// 疎結合レンダリング層
+pub const geometry = @import("zapp/geometry.zig");
+pub const primitives = @import("zapp/primitives.zig");
+
+// リッチレンダリング
+pub const rich_render = @import("zapp/rich_render.zig");
+
+// コンパイル時特殊化ベクターレンダリング
+pub const comptime_vector = @import("zapp/comptime_vector.zig");
+
+// 適応的レンダリング
+pub const adaptive_render = @import("zapp/adaptive_render.zig");
+
+// ジェスチャー入力
+pub const gesture = @import("zapp/gesture.zig");
+
+// モダンUIコンポーネント
+pub const modern_ui = @import("zapp/widgets/modern_card.zig");
+
+// 画像I/O
+pub const image_io = @import("zapp/image_io.zig");
+
+// 宣言的UI v2
+pub const ui = @import("zapp/ui.zig");
 
 // 主要な型の再エクスポート
 pub const Window = window.Window;
