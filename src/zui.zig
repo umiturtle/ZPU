@@ -103,6 +103,7 @@ test {
     _ = @import("zui/raster.zig");
     _ = @import("zui/render.zig");
     _ = @import("zui/tests.zig");
+    _ = @import("zui/ui_tests.zig");
     _ = @import("zui/font.zig");
     _ = @import("zui/frame.zig");
     _ = @import("zui/input.zig");
