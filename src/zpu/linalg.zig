@@ -651,6 +651,24 @@ pub fn eigh(a: Tensor, upper: bool) Error!struct { w: Tensor, v: Tensor } {
         }
     }
     
+    // Symmetrize the input: for a symmetric matrix, use only the specified
+    // triangle (upper or lower) and mirror it.
+    for (0..batch) |b| {
+        for (0..n) |i| {
+            for (i + 1..n) |j| {
+                const idx_ij = b * n * n + i * n + j;
+                const idx_ji = b * n * n + j * n + i;
+                if (upper) {
+                    // Use upper triangle, mirror to lower
+                    work.writeF64(idx_ji, work.readF64(idx_ij));
+                } else {
+                    // Use lower triangle, mirror to upper
+                    work.writeF64(idx_ij, work.readF64(idx_ji));
+                }
+            }
+        }
+    }
+
     // QR iterations (simplified)
     for (0..50) |_| {
         const qr_result = try qr(work);
@@ -662,14 +680,14 @@ pub fn eigh(a: Tensor, upper: bool) Error!struct { w: Tensor, v: Tensor } {
         for (0..work.numel()) |i| work.writeF64(i, new_work.readF64(i));
         
         // Update V: V = V @ Q
-        for (0..batch) |b| {
+        for (0..batch) |bi| {
             for (0..n) |i| {
                 for (0..n) |j| {
                     var sum: f64 = 0;
                     for (0..n) |k| {
-                        sum += v_data[b * n * n + i * n + k] * qr_result.q.readF64(b * n * n + k * n + j);
+                        sum += v_data[bi * n * n + i * n + k] * qr_result.q.readF64(bi * n * n + k * n + j);
                     }
-                    v_data[b * n * n + i * n + j] = sum;
+                    v_data[bi * n * n + i * n + j] = sum;
                 }
             }
         }
@@ -697,7 +715,6 @@ pub fn eigh(a: Tensor, upper: bool) Error!struct { w: Tensor, v: Tensor } {
     v.batch_depth = a.batch_depth;
     for (0..v_data.len) |i| v.writeF64(i, v_data[i]);
     
-    _ = upper; // TODO: handle upper vs lower
     return .{ .w = w, .v = v };
 }
 
