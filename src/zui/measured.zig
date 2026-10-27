@@ -1,6 +1,6 @@
 //! Measured - the result of measuring a container.
 
-const types = @import("../types.zig");
+const types = @import("types.zig");
 const Vec2 = types.Vec2;
 
 /// The result of measuring a container's children.

@@ -60,8 +60,8 @@ test "style default values" {
 
 test "style sizeAlong returns correct size" {
     var style = Style{ .w = .{ .fill = 1.0 }, .h = .{ .px = 100 } };
-    try std.testing.expect(style.sizeAlong(.x) == .{ .fill = 1.0 });
-    try std.testing.expect(style.sizeAlong(.y) == .{ .px = 100 });
+    try std.testing.expectEqual(Size{ .fill = 1.0 }, style.sizeAlong(.x));
+    try std.testing.expectEqual(Size{ .px = 100 }, style.sizeAlong(.y));
 }
 
 test "style minAlong returns correct minimum" {
