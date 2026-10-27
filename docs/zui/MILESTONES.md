@@ -483,21 +483,21 @@ APIの設計変更（直接ウィジェットモジュールを呼び出す）�
 
 ---
 
-## C4: Renderer(Backend) の実装
+## C4: Renderer(Backend) の実装 ✅
 
-**状態**: 未着手
+**状態**: ✅ 完了
 
 **具体的な作業:**
-1. `Renderer(comptime Backend: type)` を実装
-2. `SoftwareBackend` をcomptimeパラメータ対応に
-3. `TestBackend`（テスト用モック）を実装
-4. `NullBackend`（ベンチマーク用）を実装
-5. render.zig, raster.zig をバックエンド抽象化
+1. ✅ `Renderer(comptime Backend: type)` を実装
+2. ✅ `SoftwareBackend` をcomptimeパラメータ対応に
+3. ✅ `TestBackend`（テスト用モック）を実装
+4. ✅ `NullBackend`（ベンチマーク用）を実装
+5. ✅ render.zig, raster.zig をバックエンド抽象化
 
 **完了条件:**
-- [ ] 3つのバックエンド（Software, Test, Null）が動作
-- [ ] 同じDisplayListが全バックエンドで描画可能
-- [ ] バックエンド切り替えがcomptime（実行時コストゼロ）
+- [x] 3つのバックエンド（Software, Test, Null）が動作
+- [x] 同じDisplayListが全バックエンドで描画可能
+- [x] バックエンド切り替えがcomptime（実行時コストゼロ）
 
 **依存**: C2
 
