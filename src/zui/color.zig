@@ -13,16 +13,21 @@ pub const Color = struct {
     a: f32 = 1,
 
     /// Create a color from RGB hex value (e.g., 0xff8040)
-    pub fn hex(rgb: u24, alpha: f32) Color {
-        const r = @as(f32, @floatFromInt((rgb >> 16) & 0xff)) / 255.0;
-        const g = @as(f32, @floatFromInt((rgb >> 8) & 0xff)) / 255.0;
-        const b = @as(f32, @floatFromInt(rgb & 0xff)) / 255.0;
+    pub fn hex(hex_value: u24, alpha: f32) Color {
+        const r = @as(f32, @floatFromInt((hex_value >> 16) & 0xff)) / 255.0;
+        const g = @as(f32, @floatFromInt((hex_value >> 8) & 0xff)) / 255.0;
+        const b = @as(f32, @floatFromInt(hex_value & 0xff)) / 255.0;
         return .{ .r = r, .g = g, .b = b, .a = alpha };
     }
 
     /// Create a grayscale color
     pub fn gray(value: f32) Color {
         return .{ .r = value, .g = value, .b = value, .a = 1 };
+    }
+
+    /// Create a color from RGB components
+    pub fn rgb(red: f32, green: f32, blue: f32) Color {
+        return .{ .r = red, .g = green, .b = blue, .a = 1 };
     }
 
     /// Linear interpolation between two colors
@@ -40,6 +45,11 @@ pub const Color = struct {
         return .{ .r = self.r, .g = self.g, .b = self.b, .a = alpha };
     }
 
+    /// Scale RGB components
+    pub fn scale(self: Color, s: f32) Color {
+        return .{ .r = self.r * s, .g = self.g * s, .b = self.b * s, .a = self.a };
+    }
+
     /// Check if two colors are approximately equal
     pub fn approxEql(a: Color, b: Color, epsilon: f32) bool {
         return @abs(a.r - b.r) < epsilon and
@@ -47,6 +57,19 @@ pub const Color = struct {
             @abs(a.b - b.b) < epsilon and
             @abs(a.a - b.a) < epsilon;
     }
+
+    /// Convert to array [r, g, b, a]
+    pub fn toArray(self: Color) [4]f32 {
+        return .{ self.r, self.g, self.b, self.a };
+    }
+
+    /// Create from array [r, g, b, a]
+    pub fn fromArray(arr: [4]f32) Color {
+        return .{ .r = arr[0], .g = arr[1], .b = arr[2], .a = arr[3] };
+    }
+
+    /// Transparent color (alpha = 0)
+    pub const transparent: Color = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
 };
 
 // ============================================================================
