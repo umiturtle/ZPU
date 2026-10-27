@@ -15,10 +15,15 @@ const Quality = ui_mod.Quality;
 /// ```zig
 /// const MyUi = UiWith(.{ .quality = .high, .animations = false });
 /// var ui = MyUi.init(alloc, .{});
+/// 
+/// // With custom backend:
+/// const TestUi = UiWith(.{ .backend = MockBackend });
+/// var test_ui = TestUi.init(alloc, .{});
 /// ```
 pub fn UiWith(comptime cfg: Config) type {
     return struct {
         pub const config = cfg;
+        pub const Backend = cfg.backend;
         pub const Inner = Ui;
 
         inner: Ui,
@@ -56,6 +61,21 @@ pub fn UiWith(comptime cfg: Config) type {
         /// Get the antialiasing level based on quality (comptime-known)
         pub fn antialiasLevel() u2 {
             return cfg.quality.antialiasLevel();
+        }
+
+        /// Get the backend type (comptime-known)
+        pub fn backendType() type {
+            return cfg.backend;
+        }
+
+        /// Check if using software backend (comptime-known)
+        pub fn isSoftwareBackend() bool {
+            return cfg.backend == @import("config.zig").SoftwareBackend;
+        }
+
+        /// Check if using mock backend (comptime-known)
+        pub fn isMockBackend() bool {
+            return cfg.backend == @import("config.zig").MockBackend;
         }
 
         /// Access the underlying Ui for full API
@@ -118,4 +138,30 @@ test "UiWith runtime usage" {
     // Verify comptime config is accessible
     try std.testing.expect(!@TypeOf(ui_wrapper).animationsEnabled());
     try std.testing.expectEqual(Quality.high, @TypeOf(ui_wrapper).qualityLevel());
+}
+
+test "UiWith with different backends generates different types" {
+    const SoftwareUi = UiWith(.{ .backend = @import("config.zig").SoftwareBackend });
+    const MockUi = UiWith(.{ .backend = @import("config.zig").MockBackend });
+
+    // Different backends should produce different types
+    try std.testing.expect(SoftwareUi != MockUi);
+
+    // Verify backend type is accessible at comptime
+    try std.testing.expectEqual(@import("config.zig").SoftwareBackend, SoftwareUi.Backend);
+    try std.testing.expectEqual(@import("config.zig").MockBackend, MockUi.Backend);
+
+    // Verify comptime backend checks
+    try std.testing.expect(SoftwareUi.isSoftwareBackend());
+    try std.testing.expect(!SoftwareUi.isMockBackend());
+    try std.testing.expect(!MockUi.isSoftwareBackend());
+    try std.testing.expect(MockUi.isMockBackend());
+}
+
+test "UiWith backendType comptime function" {
+    const DefaultUi = UiWith(.{});
+    try std.testing.expectEqual(@import("config.zig").SoftwareBackend, DefaultUi.backendType());
+
+    const CustomUi = UiWith(.{ .backend = @import("config.zig").MockBackend });
+    try std.testing.expectEqual(@import("config.zig").MockBackend, CustomUi.backendType());
 }

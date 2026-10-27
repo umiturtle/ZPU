@@ -399,46 +399,46 @@ pub fn adapt(comptime Config: Config, physical_size: Vec2, dpi: f32) AdaptedConf
 
 ---
 
-## C1: types.zig のリファクタリング
+## C1: types.zig のリファクタリング ✅
 
-**状態**: 未着手
+**状態**: ✅ 完了
 
 **具体的な作業:**
-1. types.zig を「ハブ」型として再定義
-2. 既存の Vec2, Rect, Color などは level 0 モジュールをre-export
-3. types.zig 固有の追加メソッド（`Vec2.along`, `Vec2.index` 等）は types.zig に残す
-4. 依存関係グラフを文書化
+1. ✅ types.zig を「ハブ」型として再定義
+2. ✅ 既存の Vec2, Rect, Color などは level 0 モジュールをre-export
+3. ✅ types.zig 固有の追加メソッド（`Vec2.along`, `Vec2.index` 等）は types.zig に残す
+4. ✅ 依存関係グラフを文書化
 
 **完了条件:**
-- [ ] `zui.Vec2` が `zui.vec2.Vec2` と互換
-- [ ] types.zig が level 0 モジュールをre-export
-- [ ] 全既存テストがパス
-- [ ] 循環依存がない
+- [x] `zui.Vec2` が `zui.vec2.Vec2` と互換
+- [x] types.zig が level 0 モジュールをre-export
+- [x] 全既存テストがパス
+- [x] 循環依存がない
 
 ---
 
-## C2: Ui(Config) のcomptime特殊化
+## C2: Ui(Config) のcomptime特殊化 ✅
 
-**状態**: 未着手
+**状態**: ✅ 完了
 
 **具体的な作業:**
-1. `UiConfig` 型を定義（Backend, Widgets, Quality, Theme）
-2. `Ui(comptime Config: UiConfig)` を実装
-3. SoftwareBackend をcomptimeパラメータ化
-4. テストでモックバックエンドを使用
+1. ✅ `UiConfig` 型を定義（Backend, Widgets, Quality, Theme）
+2. ✅ `Ui(comptime Config: UiConfig)` を実装
+3. ✅ SoftwareBackend をcomptimeパラメータ化
+4. ✅ テストでモックバックエンドを使用
 
 **完了条件:**
-- [ ] `Ui(.{ .Backend = SoftwareBackend, ... })` がコンパイル通る
-- [ ] 異なるバックエンドで異なるコードが生成される
-- [ ] テストでモックバックエンドが使用可能
+- [x] `Ui(.{ .Backend = SoftwareBackend, ... })` がコンパイル通る
+- [x] 異なるバックエンドで異なるコードが生成される
+- [x] テストでモックバックエンドが使用可能
 
 **依存**: C1
 
 ---
 
-## C3: ウィジェットの分離
+## C3: ウィジェットの分離 ✅
 
-**状態**: 🔄 進行中（大幅に前進）
+**状態**: ✅ 完了
 
 **達成済み:**
 1. ✅ `src/zui/widgets/` ディレクトリ作成

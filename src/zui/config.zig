@@ -81,6 +81,9 @@ pub const Config = struct {
     /// Quality level for rendering optimizations
     quality: Quality = .medium,
 
+    /// Backend type for rendering (comptime-specialized)
+    backend: type = SoftwareBackend,
+
     /// Enable animations (comptime-eliminable)
     animations: bool = true,
 
@@ -119,6 +122,7 @@ test "BackendInterface check" {
 test "Config default values" {
     const config = Config{};
     try std.testing.expectEqual(Quality.medium, config.quality);
+    try std.testing.expectEqual(SoftwareBackend, config.backend);
     try std.testing.expect(config.animations);
     try std.testing.expect(config.tooltips);
     try std.testing.expect(config.keyboard_nav);
@@ -128,13 +132,27 @@ test "Config default values" {
 test "Config custom values" {
     const config = Config{
         .quality = .low,
+        .backend = MockBackend,
         .animations = false,
         .tooltips = false,
     };
     try std.testing.expectEqual(Quality.low, config.quality);
+    try std.testing.expectEqual(MockBackend, config.backend);
     try std.testing.expect(!config.animations);
     try std.testing.expect(!config.tooltips);
     try std.testing.expect(config.keyboard_nav); // default
+}
+
+test "Config with different backends" {
+    const software_config = Config{ .backend = SoftwareBackend };
+    const mock_config = Config{ .backend = MockBackend };
+    
+    // Different backends should be different types
+    try std.testing.expect(software_config.backend != mock_config.backend);
+    
+    // Both should implement BackendInterface
+    try std.testing.expect(BackendInterface.implements(software_config.backend));
+    try std.testing.expect(BackendInterface.implements(mock_config.backend));
 }
 
 test "default_config" {
